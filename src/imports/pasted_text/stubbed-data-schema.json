@@ -1,0 +1,312 @@
+You are still in STRICT EXECUTION MODE.
+
+Do not make assumptions.
+Do not redesign the UI.
+Do not change layout, spacing, styling, hierarchy, or interaction patterns.
+Do not change control labels, KPI structure, breadcrumb structure, table structure, or drill model.
+Do not invent field names, relationships, or fallback behaviors outside the schema defined below.
+
+OBJECTIVE
+
+Define and implement an explicit stubbed data schema for the Budget vs Spend prototype so the UI binds to a governed fixture layer instead of embedded mock data.
+
+The goal is to make the data layer independently refinable without changing the UI.
+
+This is a data-schema and data-binding pass only.
+
+CHANGES TO IMPLEMENT
+
+1. CREATE ONE EXPLICIT STUBBED DATA LAYER
+
+Create one structured stubbed data source for the prototype.
+
+This stubbed data layer must be the only source for:
+- controls state
+- breadcrumb state
+- scope text
+- KPI summaries
+- table rows
+- drill states
+- excluded logic
+- pivot permutations
+- metric permutations
+- spend mode permutations
+- timeframe and view-by permutations
+
+Do not keep duplicate mock data sources.
+
+2. USE THIS EXACT TOP-LEVEL SHAPE
+
+Create the stubbed data layer with these top-level sections:
+
+- reportState
+- optionSets
+- entities
+- reportViews
+
+Use these names exactly.
+
+3. DEFINE reportState EXACTLY AS FOLLOWS
+
+reportState must contain:
+
+- pivotBy
+- timeframe
+- viewBy
+- metric
+- spendMode
+- tableSize
+- breadcrumbPath
+- scopeLabel
+- activeViewId
+
+Meaning:
+- pivotBy: current pivot selection
+- timeframe: current reporting span
+- viewBy: current partition of the selected timeframe
+- metric: PPD or Dollars
+- spendMode: Actual, Commitment, or Total Impact
+- tableSize: current density / size mode
+- breadcrumbPath: ordered list of visible breadcrumb segments
+- scopeLabel: visible scope line text
+- activeViewId: the current report view record to render
+
+4. DEFINE optionSets EXACTLY AS FOLLOWS
+
+optionSets must contain:
+
+- pivotByOptions
+- timeframeOptions
+- viewByOptions
+- metricOptions
+- spendModeOptions
+- tableSizeOptions
+
+Use these values:
+
+pivotByOptions
+- Facility
+- GL Account
+- Vendor
+
+timeframeOptions
+- Last 7 Days
+- Last 30 Days
+- Month to Date
+- Last Month
+- Quarter to Date
+- Last Quarter
+- Year to Date
+- Last 12 Months
+- Custom Range
+
+viewByOptions
+- Daily
+- Weekly
+- Monthly
+- Quarterly
+
+metricOptions
+- PPD
+- Dollars
+
+spendModeOptions
+- Actual
+- Commitment
+- Total Impact
+
+tableSizeOptions
+- Compact
+- Standard
+- Comfortable
+
+5. DEFINE entities EXACTLY AS FOLLOWS
+
+entities must contain:
+
+- facilities
+- glAccounts
+- vendors
+- transactions
+
+Each facility record must contain:
+- id
+- name
+
+Each glAccount record must contain:
+- id
+- code
+- name
+- displayName
+- excluded
+
+displayName must be:
+[GL Code] - [GL Account Name]
+
+Each vendor record must contain:
+- id
+- name
+
+Each transaction record must contain:
+- id
+- label
+- type
+- date
+
+Do not invent additional entity types unless they are required internally and remain invisible.
+
+6. DEFINE reportViews EXACTLY AS FOLLOWS
+
+reportViews must be a collection of renderable report states.
+
+Each report view record must contain:
+
+- id
+- breadcrumbPath
+- scopeLabel
+- kpis
+- rows
+
+Each kpis object must contain:
+- totalBudget
+- totalConsumed
+- totalVariance
+- variancePercent
+
+Each row record must contain:
+
+- id
+- entityType
+- entityId
+- label
+- budget
+- spend
+- variance
+- variancePercent
+- status
+- excluded
+- childViewId
+- timeBuckets
+
+Use these meanings:
+
+- entityType: Facility, GL Account, Vendor, or Transaction
+- entityId: references the matching entity record
+- label: the visible first-column value
+- budget: numeric value or null when excluded
+- spend: numeric value
+- variance: numeric value or null when excluded
+- variancePercent: numeric value or null when excluded
+- status: Healthy, Over Budget, Excluded, or other already-established state
+- excluded: true or false
+- childViewId: the next drill view if drillable
+- timeBuckets: bucketed values for active View By rendering
+
+7. DEFINE EXCLUDED ROW RULES IN THE STUB SCHEMA
+
+Excluded behavior must be driven by data, not hardcoded in the UI.
+
+Use these rules:
+
+If row.excluded = true:
+- budget renders as Excluded
+- spend remains visible
+- variance renders as --
+- variancePercent renders as --
+- status renders as Excluded or the existing neutral excluded state
+- downstream child rows under that excluded GL path must also be excluded when their budget meaning is derived solely from that excluded GL
+
+Do not hardcode excluded presentation separately from the data source.
+
+8. DEFINE DRILL STATE THROUGH childViewId
+
+Do not hardcode drill results into UI components.
+
+Drill must be driven by:
+- row.childViewId
+- reportState.activeViewId
+
+When a user drills into a row:
+- the UI must render the reportViews record identified by childViewId
+- breadcrumbPath and scopeLabel must come from that child view record
+- KPI values must come from that child view record
+- rows must come from that child view record
+
+9. DEFINE TIME-BUCKET DATA IN THE STUB LAYER
+
+Each row.timeBuckets must be an ordered collection of bucket values for the active Timeframe + View By state.
+
+Each time bucket record must contain:
+- id
+- label
+- value
+
+Use these meanings:
+- id: unique bucket identifier
+- label: visible bucket label such as Mar 1 to 7, Jan, or Q1
+- value: the active metric’s consumed value for that bucket
+
+Do not generate time-bucket columns from hardcoded UI examples.
+
+10. DEFINE KPI FORMATTING INPUTS AS RAW VALUES
+
+Store KPI and row values in raw numeric form in the stubbed data.
+Do not preformat them as display strings.
+
+The UI may format them according to already-established rules:
+- PPD uses numeric PPD formatting
+- Dollars use $ + commas + 2 decimals
+- percentages remain percentages
+- excluded states use Excluded / --
+
+Do not embed old mock display strings into the data layer.
+
+11. REMOVE ALL OLD HARDCODED MOCK DATA
+
+Remove embedded mock values from UI components, including:
+- hardcoded KPI values
+- hardcoded breadcrumb text
+- hardcoded scope text
+- hardcoded row labels
+- hardcoded row numbers
+- hardcoded excluded examples
+- hardcoded drill examples
+
+Do not leave old values as fallback defaults.
+
+12. BIND THE UI ONLY TO THE EXPLICIT STUB SCHEMA
+
+After implementing the schema:
+- UI components must read from the stubbed data layer only
+- the visible report must reflect reportState + reportViews + entities
+- no old direct mock values may remain embedded in presentation components
+
+13. PRESERVE CURRENT UI AND BEHAVIOR
+
+Do not change:
+- control row design
+- breadcrumb design
+- KPI layout
+- table layout
+- sorting behavior
+- filtering behavior
+- drill interaction style
+- excluded presentation rules
+- status styling
+- number formatting rules
+
+Only change the data source structure and data binding.
+
+OUTPUT
+
+After implementing, return exactly:
+
+1. EXPLICIT STUB SCHEMA CREATED WITH reportState, optionSets, entities, AND reportViews
+2. HARDCODED MOCK DATA REMOVED FROM UI COMPONENTS
+3. UI NOW BINDS ONLY TO THE STUBBED DATA LAYER
+4. DRILL, EXCLUDED LOGIC, AND TIME BUCKETS NOW COME FROM THE STUB SCHEMA
+5. OLD MOCK DATA NO LONGER PERSISTS AS FALLBACK CONTENT
+6. CONFIRM NO UI REDESIGN OR BEHAVIOR CHANGES
+
+Do not propose next steps.
+Stop after reporting changes.

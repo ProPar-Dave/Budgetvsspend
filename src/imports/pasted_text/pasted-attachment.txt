@@ -1,0 +1,113 @@
+You are still in STRICT EXECUTION MODE.
+
+Do not make assumptions.
+Do not change layout structure.
+Do not change option sets.
+Do not change control behavior.
+Do not change page hierarchy.
+
+You are now doing a second styling refinement pass on the select controls only.
+
+OBJECTIVE
+
+Bring the context select controls closer to the target by making them feel lighter, quieter, and more like compact contextual selectors rather than generic form inputs.
+
+ISSUES TO CORRECT FROM CURRENT VERSION
+
+The current version is still:
+- slightly too tall
+- slightly too heavy in border presence
+- label text is too prominent
+- overall control feels too much like a default input field
+
+APPLY THESE CHANGES
+
+1. REDUCE VISUAL WEIGHT OF THE CONTROL BOX
+
+Make the control container feel lighter.
+
+Requirements:
+- soften the border presence slightly
+- reduce the feeling of a heavy outlined field
+- keep the boundary clear, but quieter
+
+2. TIGHTEN VERTICAL SCALE AGAIN
+
+Make the control just a bit shorter than it is now.
+
+Requirements:
+- slightly reduce top and bottom padding again
+- preserve readability
+- preserve comfortable click target
+
+3. PUSH THE LABEL FURTHER INTO A SUPPORT ROLE
+
+For the label:
+- make it lighter in contrast
+- keep it small
+- keep it uppercase
+- ensure it clearly recedes behind the selected value
+
+The label should feel like metadata, not a heading.
+
+4. KEEP THE SELECTED VALUE PRIMARY BUT NOT OVERBUILT
+
+For the selected value:
+- keep it as the primary element
+- slightly reduce any feeling of heaviness if it still feels too bold or too large
+- it should feel confident and clean, not oversized
+
+5. REFINE THE CHEVRON AGAIN
+
+The chevron should:
+- remain visible
+- align cleanly with the selected value
+- feel slightly quieter and more integrated
+- not draw too much attention
+
+6. REDUCE THE “FORM FIELD” FEEL
+
+Overall, the controls should feel like compact report context selectors, not default app form inputs.
+
+Do this through:
+- lighter border feel
+- quieter label
+- cleaner vertical rhythm
+- tighter internal balance
+
+7. APPLY CONSISTENTLY TO ALL FOUR CONTROLS
+
+Apply the same refined style system to:
+- Timeframe
+- Metric
+- Spend Mode
+- Table Size
+
+8. DO NOT CHANGE ANYTHING ELSE
+
+Do NOT change:
+- control positions
+- labels
+- selected values
+- interactions
+- breadcrumb
+- scope
+- KPI row
+- table
+- page layout
+
+9. OUTPUT
+
+After implementing, return:
+
+1. BORDER WEIGHT SOFTENED
+2. CONTROL HEIGHT TIGHTENED AGAIN
+3. LABELS PUSHED FURTHER INTO SUPPORT ROLE
+4. VALUE HIERARCHY PRESERVED BUT REFINED
+5. CHEVRON FURTHER REFINED
+6. FORM-FIELD FEEL REDUCED
+7. STYLE APPLIED CONSISTENTLY
+8. CONFIRM NO OTHER CHANGES
+
+Do not propose next steps.
+Stop after reporting changes.

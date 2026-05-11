@@ -1,0 +1,39 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+/* Enterprise Grid: 40px tall horizontal scrollbar */
+.enterprise-grid-scroll::-webkit-scrollbar {
+  height: 40px;
+}
+.enterprise-grid-scroll::-webkit-scrollbar:vertical {
+  width: 8px;
+}
+.enterprise-grid-scroll::-webkit-scrollbar-track:horizontal {
+  background: #f1f3f5;
+  border-top: 1px solid #e2e5ea;
+}
+.enterprise-grid-scroll::-webkit-scrollbar-thumb:horizontal {
+  background: #b0b7c3;
+  border-radius: 20px;
+  border: 10px solid #f1f3f5;
+  min-width: 60px;
+}
+.enterprise-grid-scroll::-webkit-scrollbar-thumb:horizontal:hover {
+  background: #8b95a5;
+}
+.enterprise-grid-scroll::-webkit-scrollbar-thumb:vertical {
+  background: #b0b7c3;
+  border-radius: 4px;
+}
+.enterprise-grid-scroll::-webkit-scrollbar-thumb:vertical:hover {
+  background: #8b95a5;
+}
+.enterprise-grid-scroll::-webkit-scrollbar-corner {
+  background: #f1f3f5;
+}
+/* Firefox horizontal scrollbar */
+.enterprise-grid-scroll {
+  scrollbar-width: auto;
+  scrollbar-color: #b0b7c3 #f1f3f5;
+}

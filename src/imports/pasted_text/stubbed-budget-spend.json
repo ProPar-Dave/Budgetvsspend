@@ -1,0 +1,466 @@
+````markdown
+# Prompt 32 - Configure Stubbed Data Layer for Comprehensive Budget vs Spend Payload
+
+You are still in STRICT EXECUTION MODE.
+
+## Constraints
+
+Do not make assumptions.  
+Do not redesign anything.  
+Do not change layout, spacing, styling, hierarchy, structure, or behavior outside of the requested change.  
+Do not change calculation logic.  
+Do not introduce backend integration.  
+Do not invent new payload fields beyond what is defined below.  
+Do not hardcode display values that should come from the stubbed data layer.
+
+This is a data-layer binding and UI representation pass.
+
+## Objective
+
+Configure the prototype's stubbed data layer to expect a comprehensive, governed report payload and ensure the stubbed data is correctly connected and represented in the UI.
+
+The goal of this pass is to:
+
+1. Define a realistic payload contract for the prototype
+2. Bind the UI to that payload contract
+3. Ensure the UI reflects the payload accurately across:
+   - report context
+   - KPI layer
+   - facility rows
+   - drill rows
+   - exclusion states
+   - time buckets
+   - trust and governance metadata where appropriate
+
+## Required Payload Contract
+
+Configure the stubbed data layer to expect the following payload structure.
+
+### Report Context
+
+```json
+{
+  "timeframe": {
+    "start": "2026-03-01",
+    "end": "2026-03-31",
+    "type": "CALENDAR_MONTH"
+  },
+  "viewBy": "WEEK",
+  "pivotBy": "FACILITY",
+  "metric": "TOTAL_IMPACT",
+  "spendMode": "TOTAL_IMPACT"
+}
+````
+
+### Time Buckets
+
+```json
+{
+  "timeBuckets": [
+    {
+      "id": "W1",
+      "label": "Mar 1 - Mar 7",
+      "start": "2026-03-01",
+      "end": "2026-03-07",
+      "bucketType": "WEEK",
+      "timeModel": "CALENDAR",
+      "decompositionId": "DEC-2026-03-FULL"
+    },
+    {
+      "id": "W2",
+      "label": "Mar 8 - Mar 14",
+      "start": "2026-03-08",
+      "end": "2026-03-14",
+      "bucketType": "WEEK",
+      "timeModel": "CALENDAR",
+      "decompositionId": "DEC-2026-03-FULL"
+    }
+  ]
+}
+```
+
+### KPI
+
+```json
+{
+  "kpi": {
+    "budget": 1250000,
+    "consumed": 1315000,
+    "variance": 65000,
+    "percent": 1.052,
+    "reconciliation": {
+      "rowCount": 3,
+      "includedRows": 2,
+      "excludedRows": 1,
+      "checksum": "abc123-match-table"
+    }
+  }
+}
+```
+
+### Facility Level Rows
+
+```json
+{
+  "rows": [
+    {
+      "id": "FAC-001",
+      "entityType": "FACILITY",
+      "entityLabel": "North Ridge Care Center",
+      "summary": {
+        "budget": 450000,
+        "consumed": 470000,
+        "variance": 20000,
+        "percent": 1.044
+      },
+      "timeBuckets": {
+        "W1": {
+          "total": 110000,
+          "actual": 90000,
+          "commitment": 20000,
+          "deduplicated": true
+        },
+        "W2": {
+          "total": 115000,
+          "actual": 100000,
+          "commitment": 15000,
+          "deduplicated": true
+        }
+      },
+      "spendComposition": {
+        "actualTotal": 190000,
+        "commitmentOpen": 35000,
+        "commitmentRealized": 15000
+      },
+      "censusContext": {
+        "basedOn": "MIXED",
+        "actualPercent": 0.82,
+        "projectedPercent": 0.18,
+        "impactsPPD": true
+      },
+      "decomposition": {
+        "source": "MONTHLY",
+        "method": "DAILY_PRORATION",
+        "remainderHandling": "CARRY_FORWARD",
+        "auditId": "DEC-2026-03-FULL"
+      },
+      "exclusionImpact": "NONE",
+      "aggregation": {
+        "method": "SUM_CHILDREN",
+        "childReconciliation": "MATCH"
+      },
+      "drill": {
+        "nextPivot": "GL_ACCOUNT",
+        "available": true
+      }
+    },
+    {
+      "id": "FAC-003",
+      "entityType": "FACILITY",
+      "entityLabel": "Pine Valley Assisted Living",
+      "summary": {
+        "budget": null,
+        "consumed": 120000,
+        "variance": null,
+        "percent": null
+      },
+      "timeBuckets": {
+        "W1": {
+          "total": 30000,
+          "actual": 30000,
+          "commitment": 0
+        },
+        "W2": {
+          "total": 30000,
+          "actual": 30000,
+          "commitment": 0
+        }
+      },
+      "exclusionImpact": "FULL",
+      "exclusion": {
+        "reason": "All GL Accounts excluded",
+        "source": "Budget Kernel",
+        "propagated": true
+      },
+      "drill": {
+        "nextPivot": "GL_ACCOUNT",
+        "available": true
+      }
+    }
+  ]
+}
+```
+
+### Drill Level Rows
+
+```json
+{
+  "rows": [
+    {
+      "id": "GL-6001",
+      "entityType": "GL_ACCOUNT",
+      "entityLabel": "6001 - Dietary Supplies",
+      "summary": {
+        "budget": 150000,
+        "consumed": 180000,
+        "variance": 30000,
+        "percent": 1.2
+      },
+      "timeBuckets": {
+        "W1": {
+          "total": 40000,
+          "actual": 35000,
+          "commitment": 5000
+        }
+      },
+      "censusContext": {
+        "basedOn": "ACTUAL",
+        "actualPercent": 1.0
+      },
+      "lineage": {
+        "budget": "Budget Kernel",
+        "spend": "Spend Gate",
+        "census": "Census Gate",
+        "time": "Time Model"
+      }
+    }
+  ]
+}
+```
+
+### Meta
+
+```json
+{
+  "meta": {
+    "calculationEngineVersion": "v1.3.2",
+    "kernelVersion": "budget-kernel-v2",
+    "governance": {
+      "glIsCanonical": true,
+      "categoryNotUsed": true
+    },
+    "spendRules": {
+      "mode": "TOTAL_IMPACT",
+      "deduplication": "COMMITMENT_REMOVED_ON_ACTUAL"
+    },
+    "timeRules": {
+      "model": "CALENDAR",
+      "supportsMixedModels": true
+    }
+  }
+}
+```
+
+## Changes to Implement
+
+### 1. Configure the Stubbed Data Layer to Expect This Full Payload
+
+Create or refactor the prototype's stubbed data layer so it expects a comprehensive payload with the following top-level domains:
+
+* reportContext
+* timeBuckets
+* kpi
+* rows
+* meta
+
+If the current stubs are fragmented, consolidate them behind a clear payload shape that can support:
+
+* top-level report rendering
+* row rendering
+* drill rendering
+* exclusion rendering
+* trust and governance representation later
+
+Do not connect to a real database.
+
+### 2. Bind the UI to Report Context
+
+Ensure the UI reads from the stubbed payload for:
+
+* Timeframe
+* Breakdown By / View By
+* Pivot By
+* Metric
+* Spend Mode
+
+The breadcrumb helper / context line must use the resolved report context, not hardcoded text.
+
+For the supplied example, the UI should be able to derive and display a context like:
+
+* Facilities | Mar 1, 2026 - Mar 31, 2026
+* or bucket-aware wording when appropriate to the current view
+
+Do not hardcode labels that should come from payload values.
+
+### 3. Bind KPI Row to KPI Payload
+
+Ensure KPI cards are driven by `kpi`:
+
+* budget -> Total Budget
+* consumed -> Total Consumed
+* variance -> Total Variance
+* percent -> Variance %
+
+Do not hardcode KPI values.
+
+Retain the reconciliation payload in the stubbed data layer even if it is not yet visibly surfaced.
+
+### 4. Bind Table Rows to Row Payload
+
+Ensure the table uses `rows` as the source of truth for:
+
+* entity label
+* summary values
+* time bucket values
+* exclusion state
+* drill availability
+
+For facility-level rows:
+
+* `entityLabel` should populate the first column
+* `summary` should populate aggregate row values when Full Timeframe is active
+* `timeBuckets` should populate stacked rows or bucket-aware views when Breakdown By is active
+
+### 5. Bind Time Buckets to Period Rendering
+
+Ensure the UI renders time bucket labels from the governed `timeBuckets` payload, not from manually composed strings.
+
+For the supplied example:
+
+* W1 -> Mar 1 - Mar 7
+* W2 -> Mar 8 - Mar 14
+
+The UI should use:
+
+* `id` as the stable key
+* `label` for display
+* `start` and `end` for derived context if needed
+
+### 6. Represent Total Impact Correctly from Bucket Data
+
+For each row and each time bucket, the stubbed data layer must support:
+
+* total
+* actual
+* commitment
+
+When the UI is in TOTAL_IMPACT / TOTAL_IMPACT mode, it must read from the payload accordingly.
+
+Respect:
+
+* `deduplicated: true`
+* `meta.spendRules.deduplication = COMMITMENT_REMOVED_ON_ACTUAL`
+
+Do not change calculation logic.
+This pass is about making the stubbed layer expect and carry the right data structure.
+
+### 7. Represent Excluded Rows Correctly
+
+Ensure the UI can accurately represent exclusion states from payload.
+
+For rows where:
+
+* `exclusionImpact = "FULL"`
+
+The UI must treat the row as excluded according to established report rules:
+
+* budget displays as Excluded
+* spend remains visible
+* variance displays as --
+* percent displays as --
+* treatment is neutral and passive
+
+Do not hardcode exclusion.
+Drive it from payload.
+
+### 8. Support Census Context in the Stubbed Layer
+
+Ensure the stubbed layer carries `censusContext` through to the UI.
+
+This does not require surfacing every subfield right now, but the UI must be correctly bound so that:
+
+* PPD-related views can use census context
+* multiple census conditions can later be represented without reworking the payload
+* `impactsPPD` is available to the UI where relevant
+
+### 9. Support Drill Payloads with Correct Shape
+
+Ensure drill views can consume the same general payload pattern using drill-level rows.
+
+For the supplied GL Account example:
+
+* `entityType = GL_ACCOUNT`
+* `entityLabel` should populate the first column when drilled
+* `summary`, `timeBuckets`, `censusContext`, and `lineage` must remain available in the stubbed layer
+
+Do not flatten away fields that will be needed later.
+
+### 10. Retain Trust and Governance Metadata in the Stubbed Layer
+
+Ensure the stubbed layer preserves:
+
+* calculationEngineVersion
+* kernelVersion
+* governance.glIsCanonical
+* governance.categoryNotUsed
+* spendRules
+* timeRules
+
+Even if not all of this is surfaced in the UI yet, it must remain part of the expected payload so the prototype is ready for later trust-layer expansion.
+
+### 11. Remove Hardcoded UI Values That Conflict with the Payload
+
+Audit the current prototype and replace any hardcoded report values that should come from the stubbed data layer, including:
+
+* breadcrumb helper text
+* period labels
+* KPI values
+* first-column labels
+* row values
+* exclusion treatment
+* bucket labels
+
+The UI must represent the stubbed payload accurately.
+
+### 12. Preserve Existing UI Structure
+
+Do not redesign the report.
+Do not change:
+
+* control bar layout
+* KPI layout
+* table layout
+* sticky behavior
+* scroll behavior
+* column styling
+* interactions
+
+This pass is about data readiness and correct UI binding.
+
+## Preserve
+
+* Existing visual design
+* Existing interaction patterns
+* Existing drill model
+* Existing filtering and sorting UI
+* Existing layout, spacing, and typography
+* Existing calculation behavior
+
+## Output
+
+Respond with:
+
+1. Confirmation that the stubbed data layer now expects the comprehensive payload structure
+2. Confirmation that report context, KPI, time buckets, rows, drill rows, and meta are preserved in the stubbed data layer
+3. Confirmation that the UI is bound to the stubbed payload instead of conflicting hardcoded values
+4. Confirmation that exclusion rows are represented correctly from payload
+5. Confirmation that Total Impact and time bucket data are represented from the supplied structure
+6. Confirmation that trust and governance metadata remain in the stubbed layer for future use
+7. Confirmation that no calculation logic was changed
+8. Confirmation that no other layout, structure, or behavior was changed
+
+Do not propose next steps.
+Stop after reporting changes.
+
+```
+```

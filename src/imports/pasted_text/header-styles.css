@@ -1,0 +1,118 @@
+# Prompt 23 - Column Adjuster + Filter Input Styling (Header Only)
+
+You are still in STRICT EXECUTION MODE.
+
+---
+
+## Constraints
+
+Do not make assumptions.  
+Do not redesign anything.  
+Do not change layout, spacing, typography, hierarchy, structure, or behavior outside of the requested change.  
+Do not add new UI elements unless explicitly instructed.  
+Do not remove existing UI elements unless explicitly instructed.  
+
+This is a visual styling refinement for column headers only.
+
+---
+
+## Objective
+
+Standardize:
+
+1. Column adjuster (resize handle)
+2. Filter input styling inside header cells
+
+---
+
+## Changes to Implement
+
+### 1. Column Adjuster (Resize Handle)
+
+Update the column adjuster to:
+
+- Width: **4px**
+- Height: **12px**
+- Color: **#AEB3BC**
+
+Positioning:
+- Keep existing placement (top-right of header cell)
+- Maintain flush alignment to top and right edge
+- Do not alter interaction behavior (drag to resize)
+
+Do not change:
+- hit area behavior
+- cursor behavior
+- resize logic
+
+---
+
+### 2. Filter Input Styling
+
+Update the filter input inside each column header:
+
+#### Shape & Radius
+- Border radius: **0 (square corners)**
+
+#### Border Rules
+- Top border: **visible**
+- Bottom border: **visible**
+- Left border: **none**
+- Right border: **none**
+
+#### Border Color
+- Bottom border color: **#9FA6BC**
+- Top border color: match existing neutral border tone (do not introduce a new color)
+
+---
+
+### 3. Layout + Alignment
+
+The filter input must:
+
+- Span full width of the column header
+- Touch the **left edge** of the header cell
+- Touch the **right edge** of the header cell
+- Touch the **bottom edge** of the header cell
+
+There should be:
+- no horizontal inset
+- no bottom padding gap between input and header boundary
+
+---
+
+### 4. Preserve Header Content
+
+Do not alter:
+- column label (e.g., Budget)
+- sort icons
+- spacing between label and filter
+- header height
+- typography
+
+Only adjust the filter field styling and alignment.
+
+---
+
+## Preserve
+
+- Existing table structure
+- Existing column widths and resizing behavior
+- Existing sticky behavior
+- Existing sorting and filtering logic
+- Existing hover and focus states (unless impacted by border changes)
+- All other UI elements and interactions
+
+---
+
+## Output
+
+Respond with:
+
+1. Confirmation that column adjusters are 4px x 12px and #AEB3BC  
+2. Confirmation that filter inputs have 0 radius and correct border rules  
+3. Confirmation that filter inputs align flush with header edges  
+4. Confirmation that header layout and behavior were otherwise unchanged  
+
+Do not propose next steps.  
+Stop after reporting changes.
