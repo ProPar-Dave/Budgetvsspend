@@ -29,7 +29,7 @@ const BVS_BASE = `https://${projectId}.supabase.co/functions/v1/make-server-b98a
 // carry an "eng"|"leg" suffix so toggling the flag never surfaces stale entries
 // from the other path.
 const BVS_ENGINE_BASE = `https://${projectId}.supabase.co/functions/v1/make-server-b98afb97/bvs`
-const USE_ENGINE = false
+const USE_ENGINE = true
 
 const hdrs = () => ({
   "Content-Type": "application/json",
@@ -256,9 +256,11 @@ function getTimeframeMonths(timeframe: Timeframe, anchor: Date): string[] {
 
 // Extended row type that carries entityId for period matching.
 // Ship 4b: also carries v2-enriched server PPD values when present.
+// Round 3: _personDaysByType for multi-type CCRC Census column rendering.
 type TableRowWithEntity = TableRow & {
   _entityId: string
   _personDays?: number | null
+  _personDaysByType?: Record<string, number> | null
   _monthlyPersonDays?: MonthlyPdMap
   // Ship 4b: server-computed PPD (v2 enriched only; undefined on legacy)
   _spendPPD?: number | null
@@ -277,6 +279,7 @@ function mapRowWithEntity(r: ReportRow, entityType: string, index: number): Tabl
     censusValue: r.censusValue,
     censusBasis: r.censusBasis,
     _personDays: r.personDays ?? null,
+    _personDaysByType: (r as any).personDaysByType ?? null,
     _monthlyPersonDays: r.monthlyPersonDays ?? undefined,
     // Ship 4b: pass through server-computed PPD if present
     _spendPPD: r.spendPPD,
@@ -488,6 +491,14 @@ export class BvsAdapter implements ReportRepository {
   // Drives the v2 vs legacy branching in applyDataShaping/getProcessedData.
   private _viewShapes = new Map<string, "v2" | "legacy">()
 
+  // Phase 4b QA #3 defensive guard — tracks cache keys that have already
+  // been retried once due to anomalous 1-row root response. Prevents an
+  // infinite retry loop if the underlying race produces 1-row results
+  // consistently for some viewId (e.g. a legitimate tenant with one
+  // facility). Cleared whenever caches are invalidated (spend mode or
+  // timeframe change) so the guard re-arms on the next legitimate boot.
+  private _anomalyRetried = new Set<string>()
+
   /** Current spend mode — used for cache keying and server requests */
   get spendMode(): SpendMode { return this._spendMode }
 
@@ -502,6 +513,7 @@ export class BvsAdapter implements ReportRepository {
     this.pendingFetches.clear()
     this.pendingPeriodFetches.clear()
     this._viewShapes.clear()
+    this._anomalyRetried.clear()
     console.log(`BVS: spend mode changed to ${sm} — caches invalidated`)
     return true
   }
@@ -527,6 +539,7 @@ export class BvsAdapter implements ReportRepository {
     this.pendingFetches.clear()
     this.pendingPeriodFetches.clear()
     this._viewShapes.clear()
+    this._anomalyRetried.clear()
     console.log(`BVS: timeframe range changed to ${start ?? "(none)"}..${end ?? "(none)"} — caches invalidated`)
     return true
   }
@@ -607,6 +620,35 @@ export class BvsAdapter implements ReportRepository {
             // Extract inline sparkline data from rows before transform
             this._extractInlineSparklines(viewId, dbViewData)
             const reportView = assembleReportView(dbViewData)
+            // Phase 4b QA #3 defensive guard — a root view (facility / GL /
+            // vendor root) should never return exactly 1 row in any legitimate
+            // dataset Procurement Partners ships. If we see that pattern, log
+            // a warning and refetch once. Some intermittent boot race produces
+            // this state where the response carries a single entity's totals
+            // as if it were the portfolio; the underlying cause has resisted
+            // reproduction. _anomalyRetried is a per-cacheKey one-shot, so we
+            // never loop more than once even if the retry returns the same
+            // anomalous shape (we cache and accept it on the second pass to
+            // avoid blocking a tenant that legitimately has one facility).
+            const isRootView = viewId === "bvs-fac-root"
+              || viewId === "bvs-gl-root"
+              || viewId === "bvs-vendor-root"
+            if (
+              attempt === 0
+              && isRootView
+              && reportView.rows.length === 1
+              && !this._anomalyRetried.has(cacheKey)
+            ) {
+              console.warn(
+                `BVS: anomalous 1-row response for root view ${viewId} `
+                + `(row label="${reportView.rows[0]?.label ?? "?"}", `
+                + `consumed=${reportView.kpi?.consumed ?? "?"}) — refetching once`
+              )
+              this._anomalyRetried.add(cacheKey)
+              // Small delay to let any racing state settle before retry.
+              await new Promise(r => setTimeout(r, 250))
+              continue
+            }
             this.viewCache.set(cacheKey, reportView)
             console.log(`BVS: view ${viewId} cached (${reportView.rows.length} rows, shape=${shape})`)
             return reportView

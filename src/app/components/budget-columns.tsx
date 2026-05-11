@@ -343,20 +343,53 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
     ),
   )
 
-  // Census column — facility-level only, PPD metric only
-  if (isFacilityView && !showTransactionCols && isPpd) {
+  // Census column — PPD metric only. Round 3: shown on all PPD drills (was
+  // facility-pivot-only). Renders cumulative person-days for the timeframe;
+  // for multi-type CCRCs, renders stacked per-type breakdown.
+  if (!showTransactionCols && isPpd) {
     cols.push(
       col.accessor("censusValue", {
         header: "Census",
         meta: { numeric: true },
-        size: 90,
-        minSize: 65,
+        size: 120,
+        minSize: 90,
         enableSorting: true,
         cell: (info: any) => {
           const val = info.getValue()
           if (val == null) return <span className="text-gray-300">--</span>
           const basis = info.row.original.censusBasis
           const suffix = basis === "PROJECTED" ? "P" : ""
+          const byType: Record<string, number> | null | undefined = info.row.original._personDaysByType
+          // Multi-type cell: render stacked "type · num" rows.
+          // Single-type or no breakdown: render single cumulative number.
+          const nonZeroTypes = byType
+            ? Object.entries(byType).filter(([, pd]) => Number(pd) > 0)
+            : []
+          if (nonZeroTypes.length > 1) {
+            // Stable type ordering: AL, IL, SNF, then anything else alphabetical.
+            const order = ["AL", "IL", "SNF"]
+            nonZeroTypes.sort(([a], [b]) => {
+              const ai = order.indexOf(a)
+              const bi = order.indexOf(b)
+              if (ai !== -1 && bi !== -1) return ai - bi
+              if (ai !== -1) return -1
+              if (bi !== -1) return 1
+              return a.localeCompare(b)
+            })
+            return (
+              <span style={TABULAR_NUMS} title={basis === "PROJECTED" ? "Projected census" : "Actual census"}>
+                <span className="flex flex-col items-end leading-tight">
+                  {nonZeroTypes.map(([type, pd]) => (
+                    <span key={type} className="text-[12px]">
+                      <span className="text-gray-500 mr-1">{type}</span>
+                      {Math.round(Number(pd)).toLocaleString("en-US")}
+                    </span>
+                  ))}
+                </span>
+                {suffix && <span className="text-gray-400 text-[10px] ml-0.5">{suffix}</span>}
+              </span>
+            )
+          }
           return (
             <span style={TABULAR_NUMS} title={basis === "PROJECTED" ? "Projected census" : "Actual census"}>
               {Math.round(val).toLocaleString("en-US")}{suffix && <span className="text-gray-400 text-[10px] ml-0.5">{suffix}</span>}

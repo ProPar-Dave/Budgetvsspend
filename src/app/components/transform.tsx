@@ -241,6 +241,7 @@ export function transformRow(db: DbRow, related: DbRowRelated): ReportRow {
     censusValue: db.censusValue,
     censusBasis: db.censusBasis,
     personDays: db.personDays,
+    personDaysByType: (db as any).personDaysByType,
     monthlyPersonDays: db.monthlyPersonDays,
     // Ship 4b: server-computed PPD values (v2 enriched only; undefined on legacy)
     spendPPD: (db as any).spendPPD ?? undefined,
