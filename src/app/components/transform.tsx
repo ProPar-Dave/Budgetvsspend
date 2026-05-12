@@ -247,6 +247,14 @@ export function transformRow(db: DbRow, related: DbRowRelated): ReportRow {
     spendPPD: (db as any).spendPPD ?? undefined,
     budgetPPD: (db as any).budgetPPD ?? undefined,
     variancePPD: (db as any).variancePPD ?? undefined,
+    // Round 4c: GL applicability contract — same pattern as Round 3.5's
+    // transformKpi pass-through. transformRow is an EXPLICIT REBUILD, not a
+    // spread; unknown engine fields are dropped unless listed here. Without
+    // these three lines the Census column can't filter by applicability and
+    // the KPI annotation won't fire its gating check.
+    _applicableCensusTypes: (db as any)._applicableCensusTypes ?? null,
+    _nonApplicablePersonDays: (db as any)._nonApplicablePersonDays ?? 0,
+    _ppdCalculationBasis: (db as any)._ppdCalculationBasis ?? undefined,
   }
 }
 
