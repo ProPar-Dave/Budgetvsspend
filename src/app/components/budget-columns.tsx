@@ -413,10 +413,18 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
             const allTypes = Object.keys(byType).sort(sortTypes)
             const excludedTypes = allTypes.filter(t => !applicable.includes(t) && Number(byType[t]) > 0)
             const includedSum = includedEntries.reduce((a, [, pd]) => a + pd, 0)
+            // Round 4e fix: tooltip "Included" must match the types actually
+            // contributing to the denominator (those with pd > 0), not the GL's
+            // applicability definition. The divergence is visible at single-type
+            // facilities — a universal GL at AL-only Underwood is applicable to
+            // AL+IL+SNF but only AL contributes 653 PD. Listing all three as
+            // "Included: AL + IL + SNF" with "Included person-days: 653"
+            // misleadingly implies the 653 includes IL and SNF.
+            const includedTypeLabels = includedEntries.map(([t]) => t).join(" + ") || "(none)"
             // Directive tooltip format — explicit Included/Excluded sections.
             const tooltip = [
               "PPD denominator basis",
-              `Included: ${applicable.join(" + ") || "(none)"}`,
+              `Included: ${includedTypeLabels}`,
               `Included person-days: ${fmt(includedSum)}`,
               excludedTypes.length > 0
                 ? `Excluded: ${excludedTypes.join(" + ")}`
