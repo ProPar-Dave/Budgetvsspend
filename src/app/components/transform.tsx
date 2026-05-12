@@ -272,6 +272,10 @@ export function transformKpi(dbKpi: DbKpi): ReportKpi {
     totalPersonDays: (dbKpi as any).totalPersonDays ?? 0,
     monthlyPersonDays: (dbKpi as any).monthlyPersonDays ?? undefined,
     projectionStatus: (dbKpi as any).projectionStatus ?? null,
+    // Round 3.5: per-type breakdown of the shared denominator, surfaced in the
+    // KPI annotation. Stripped here previously because transformKpi builds an
+    // explicit object rather than spreading dbKpi.
+    personDaysByType: (dbKpi as any).personDaysByType ?? undefined,
     // Ship 4b: server-computed PPD values (v2 enriched only; undefined on legacy)
     spendPPD: (dbKpi as any).spendPPD ?? undefined,
     budgetPPD: (dbKpi as any).budgetPPD ?? undefined,
