@@ -257,6 +257,10 @@ function getTimeframeMonths(timeframe: Timeframe, anchor: Date): string[] {
 // Extended row type that carries entityId for period matching.
 // Ship 4b: also carries v2-enriched server PPD values when present.
 // Round 3: _personDaysByType for multi-type CCRC Census column rendering.
+// Round 4b: GL applicability contract — engine emits per-row applicability
+// metadata when GL is in scope (groupBy=gl OR gl filter). _personDaysByType
+// remains the FULL scoped breakdown (not pre-filtered) so the UI can derive
+// the filtered view and explain excluded types in tooltips/debug.
 type TableRowWithEntity = TableRow & {
   _entityId: string
   _personDays?: number | null
@@ -266,6 +270,10 @@ type TableRowWithEntity = TableRow & {
   _spendPPD?: number | null
   _budgetPPD?: number | null
   _variancePPD?: number | null
+  // Round 4b: GL applicability contract (Path B math-aware mode)
+  _applicableCensusTypes?: string[] | null
+  _nonApplicablePersonDays?: number
+  _ppdCalculationBasis?: "full_scope" | "gl_applicability" | "not_applicable"
 }
 
 function mapRowWithEntity(r: ReportRow, entityType: string, index: number): TableRowWithEntity {
@@ -285,6 +293,14 @@ function mapRowWithEntity(r: ReportRow, entityType: string, index: number): Tabl
     _spendPPD: r.spendPPD,
     _budgetPPD: r.budgetPPD,
     _variancePPD: r.variancePPD,
+    // Round 4b: explicit pass-through for GL applicability contract.
+    // Engine emits these as `_applicableCensusTypes`/`_nonApplicablePersonDays`/
+    // `_ppdCalculationBasis` (with underscores already). transformRow's ...db
+    // spread carries them through; we forward explicitly for type-safety and to
+    // make the contract visible at this seam.
+    _applicableCensusTypes: (r as any)._applicableCensusTypes ?? null,
+    _nonApplicablePersonDays: (r as any)._nonApplicablePersonDays ?? 0,
+    _ppdCalculationBasis: (r as any)._ppdCalculationBasis ?? undefined,
   }
 }
 

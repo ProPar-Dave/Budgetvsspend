@@ -172,6 +172,39 @@ export function EnterpriseGrid<T>({ table, gridState, onGridStateChange, viewSta
   const [prevTimeframe, setPrevTimeframe] = useState<string>(timeframe)
   const rows = table.getRowModel().rows
 
+  // Round 4c — derive GL-in-scope signal for KPI annotation gating. Per
+  // directive, the GL applicability annotation appears when:
+  //   - GL is grouped (groupBy=gl, rows have basis=gl_applicability or not_applicable)
+  //   - OR a GL filter exists (same row signal)
+  //   - OR any visible row has gl_applicability basis
+  // All three reduce to: at least one visible row has basis in
+  // {gl_applicability, not_applicable}.
+  const hasAnyGlScopedRow = rows.some(r => {
+    const basis = (r.original as any)?._ppdCalculationBasis
+    return basis === "gl_applicability" || basis === "not_applicable"
+  })
+
+  // Round 4c — dev-mode drift detector. Asserts engine ↔ UI invariant:
+  //   _personDays + _nonApplicablePersonDays === sum(_personDaysByType.values)
+  // Runs once per render. Logs `[bvs.applicability.drift]` for grep targets.
+  // Lightweight: only iterates rows with basis set, skips legacy/pre-4b rows.
+  if (typeof window !== "undefined") {
+    for (const r of rows) {
+      const o: any = r.original
+      if (!o || !o._ppdCalculationBasis) continue
+      const byType = o._personDaysByType as Record<string, number> | null | undefined
+      if (!byType) continue
+      const byTypeSum = Object.values(byType).reduce((a, b) => a + Number(b), 0)
+      const claimed = Number(o._personDays ?? 0) + Number(o._nonApplicablePersonDays ?? 0)
+      if (Math.abs(byTypeSum - claimed) > 0.001) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[bvs.applicability.drift] label=${o.label ?? "(no label)"} basis=${o._ppdCalculationBasis} personDays=${o._personDays} nonApplicable=${o._nonApplicablePersonDays} byTypeSum=${byTypeSum}`
+        )
+      }
+    }
+  }
+
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -651,6 +684,15 @@ export function EnterpriseGrid<T>({ table, gridState, onGridStateChange, viewSta
                 <span className="text-amber-500 ml-1">(includes projected census)</span>
               )}
             </div>
+            {/* Round 4c — GL applicability note. Per directive, surfaces the
+                aggregate vs row denominator distinction when any visible row
+                uses GL applicability. Hidden in pure facility/vendor views
+                where all rows are full_scope. */}
+            {hasAnyGlScopedRow && (
+              <div className="text-[10px] text-gray-400 pb-0.5 cursor-default italic ml-3 leading-tight" style={{ maxWidth: 380 }}>
+                Aggregate PPD uses the full selected census scope. GL row PPD may use a narrower denominator based on GL census applicability.
+              </div>
+            )}
           </div>
         )}
       </div>

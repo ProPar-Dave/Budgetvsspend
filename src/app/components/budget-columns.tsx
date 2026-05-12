@@ -267,9 +267,16 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
       cell: info => {
         const row = info.row.original
         if (row.excluded) return <span className="text-gray-400">--</span>
-        if (isPpd && row._ppdNull) return <span className="text-gray-400">--</span>
+        // Round 4c: `—` (em dash) means "not applicable" — engine emitted
+        // null PPD because no census denominator applies (overhead GL, or
+        // applicable types ∩ scope yields zero person-days). Distinct from
+        // `$0.00` which means "applicable but zero".
+        if (isPpd && row._ppdNull) return <span className="text-gray-400" title="No census denominator applies to this row">—</span>
         const budget = info.getValue() ?? 0
-        if (budget === 0) return <span className="text-gray-400">--</span>
+        // In dollars mode, $0 budget → `--` (no allocation). In PPD mode,
+        // applicable-but-zero falls through to CurrencyCell which renders
+        // `$0.00` per directive.
+        if (budget === 0 && !isPpd) return <span className="text-gray-400">--</span>
         return <CurrencyCell value={budget} isPpd={isPpd} />
       },
       sortingFn: withLabelTieBreaker((rowA, rowB, columnId) => {
@@ -286,7 +293,7 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
       minSize: 80,
       cell: info => {
         const row = info.row.original
-        if (isPpd && row._ppdNull) return <span className="text-gray-400">--</span>
+        if (isPpd && row._ppdNull) return <span className="text-gray-400" title="No census denominator applies to this row">—</span>
         return <CurrencyCell value={info.getValue() ?? 0} isPpd={isPpd} />
       },
       sortingFn: withLabelTieBreaker((rowA, rowB, columnId) => {
@@ -304,9 +311,9 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
       cell: info => {
         const row = info.row.original
         if (row.excluded) return <span className="text-gray-400">--</span>
-        if (isPpd && row._ppdNull) return <span className="text-gray-400">--</span>
+        if (isPpd && row._ppdNull) return <span className="text-gray-400" title="No census denominator applies to this row">—</span>
         const budget = row.budget ?? 0
-        if (budget === 0) return <span className="text-gray-400">--</span>
+        if (budget === 0 && !isPpd) return <span className="text-gray-400">--</span>
         return <CurrencyCell value={info.getValue() ?? 0} isPpd={isPpd} />
       },
       sortingFn: withLabelTieBreaker((rowA, rowB, columnId) => {
@@ -343,62 +350,154 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
     ),
   )
 
-  // Census column — PPD metric only. Round 3.5: gated to facility-pivot views
-  // (groupBy=facility), where each row IS a different facility and the per-row
-  // breakdown carries real per-row variation. At GL-pivot / vendor-pivot views
-  // (portfolio-shared denominator per BVS Reporting Contract), every row would
-  // share the same denominator — displaying it per-row creates a misleading
-  // implication of per-row applicability. Doctrine: PPD denominator is
-  // determined by explicit facility filter scope, not row identity. The shared
-  // denominator + breakdown is surfaced once in the KPI annotation header for
-  // those views instead.
-  if (isFacilityView && !showTransactionCols && isPpd) {
+  // Census column — PPD metric only. Round 4c: shown on all PPD drills (was
+  // gated to facility-pivot in Round 3.5). Cell renders one of three forms
+  // based on row._ppdCalculationBasis (emitted by v71+ engine):
+  //
+  //   - "not_applicable" (overhead GL) — muted em dash, tooltip explains.
+  //   - "gl_applicability" — only applicable types from _personDaysByType,
+  //     subtle scoped indicator (italicized type labels), tooltip itemizes
+  //     included/excluded types + person-days per directive format.
+  //   - "full_scope" or undefined — current Round 3 stacked-type rendering
+  //     (full breakdown, no narrowing).
+  //
+  // Per governance: _personDaysByType is the FULL scoped breakdown — never
+  // mutated. Filtering happens only at render. Tooltip always able to
+  // surface the full breakdown.
+  if (!showTransactionCols && isPpd) {
     cols.push(
       col.accessor("censusValue", {
         header: "Census",
         meta: { numeric: true },
-        size: 120,
+        size: 130,
         minSize: 90,
         enableSorting: true,
         cell: (info: any) => {
+          const row = info.row.original
+          const basis: "full_scope" | "gl_applicability" | "not_applicable" | undefined =
+            row._ppdCalculationBasis
+          const censusBasisKind = row.censusBasis
+          const projectedSuffix = censusBasisKind === "PROJECTED" ? "P" : ""
+          const byType: Record<string, number> | null | undefined = row._personDaysByType
+          const applicable: string[] | null | undefined = row._applicableCensusTypes
+          const nonApplicablePD: number = Number(row._nonApplicablePersonDays ?? 0)
+
+          // Stable AL/IL/SNF ordering helper.
+          const TYPE_ORDER = ["AL", "IL", "SNF"]
+          const sortTypes = (a: string, b: string) => {
+            const ai = TYPE_ORDER.indexOf(a)
+            const bi = TYPE_ORDER.indexOf(b)
+            if (ai !== -1 && bi !== -1) return ai - bi
+            if (ai !== -1) return -1
+            if (bi !== -1) return 1
+            return a.localeCompare(b)
+          }
+          const fmt = (n: number) => Math.round(n).toLocaleString("en-US")
+
+          // ---- Branch 1: overhead → muted em dash. ----
+          if (basis === "not_applicable") {
+            return (
+              <span
+                className="text-gray-400"
+                style={TABULAR_NUMS}
+                title={"No census denominator applies to this GL"}
+              >
+                —
+              </span>
+            )
+          }
+
+          // ---- Branch 2: gl_applicability → filtered types + scoped indicator. ----
+          if (basis === "gl_applicability" && byType && Array.isArray(applicable)) {
+            const includedEntries: Array<[string, number]> = applicable
+              .map((t: string) => [t, Number(byType[t] ?? 0)] as [string, number])
+              .filter(([, pd]) => pd > 0)
+              .sort(([a], [b]) => sortTypes(a, b))
+            const allTypes = Object.keys(byType).sort(sortTypes)
+            const excludedTypes = allTypes.filter(t => !applicable.includes(t) && Number(byType[t]) > 0)
+            const includedSum = includedEntries.reduce((a, [, pd]) => a + pd, 0)
+            // Directive tooltip format — explicit Included/Excluded sections.
+            const tooltip = [
+              "PPD denominator basis",
+              `Included: ${applicable.join(" + ") || "(none)"}`,
+              `Included person-days: ${fmt(includedSum)}`,
+              excludedTypes.length > 0
+                ? `Excluded: ${excludedTypes.join(" + ")}`
+                : "Excluded: (none)",
+              `Excluded person-days: ${fmt(nonApplicablePD)}`,
+            ].join("\n")
+
+            if (includedEntries.length === 0) {
+              // Edge case: applicable types exist but in-scope PD for them is 0
+              // (Alderwood-AL × SNF-only GL). Render em dash + tooltip.
+              return (
+                <span className="text-gray-400" style={TABULAR_NUMS} title={tooltip}>
+                  —
+                </span>
+              )
+            }
+            if (includedEntries.length === 1) {
+              // Single applicable type with PD > 0 — single-line render.
+              const [type, pd] = includedEntries[0]
+              return (
+                <span style={TABULAR_NUMS} title={tooltip} className="cursor-help">
+                  <span className="text-gray-500 italic mr-1">{type}</span>
+                  {fmt(pd)}
+                  {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
+                </span>
+              )
+            }
+            // Multi-type — stacked render, italicized type labels signal scoped.
+            return (
+              <span style={TABULAR_NUMS} title={tooltip} className="cursor-help">
+                <span className="flex flex-col items-end leading-tight">
+                  {includedEntries.map(([type, pd]) => (
+                    <span key={type} className="text-[12px]">
+                      <span className="text-gray-500 italic mr-1">{type}</span>
+                      {fmt(pd)}
+                    </span>
+                  ))}
+                </span>
+                {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
+              </span>
+            )
+          }
+
+          // ---- Branch 3: full_scope (or legacy/undefined basis). ----
           const val = info.getValue()
           if (val == null) return <span className="text-gray-300">--</span>
-          const basis = info.row.original.censusBasis
-          const suffix = basis === "PROJECTED" ? "P" : ""
-          const byType: Record<string, number> | null | undefined = info.row.original._personDaysByType
-          // Multi-type cell: render stacked "type · num" rows.
-          // Single-type or no breakdown: render single cumulative number.
           const nonZeroTypes = byType
             ? Object.entries(byType).filter(([, pd]) => Number(pd) > 0)
             : []
           if (nonZeroTypes.length > 1) {
-            // Stable type ordering: AL, IL, SNF, then anything else alphabetical.
-            const order = ["AL", "IL", "SNF"]
-            nonZeroTypes.sort(([a], [b]) => {
-              const ai = order.indexOf(a)
-              const bi = order.indexOf(b)
-              if (ai !== -1 && bi !== -1) return ai - bi
-              if (ai !== -1) return -1
-              if (bi !== -1) return 1
-              return a.localeCompare(b)
-            })
+            nonZeroTypes.sort(([a], [b]) => sortTypes(a, b))
+            const fullSum = nonZeroTypes.reduce((a, [, pd]) => a + Number(pd), 0)
+            const tooltip = [
+              "PPD denominator basis",
+              `Full scope: ${nonZeroTypes.map(([t]) => t).join(" + ")}`,
+              `Person-days: ${fmt(fullSum)}`,
+            ].join("\n")
             return (
-              <span style={TABULAR_NUMS} title={basis === "PROJECTED" ? "Projected census" : "Actual census"}>
+              <span style={TABULAR_NUMS} title={tooltip}>
                 <span className="flex flex-col items-end leading-tight">
                   {nonZeroTypes.map(([type, pd]) => (
                     <span key={type} className="text-[12px]">
                       <span className="text-gray-500 mr-1">{type}</span>
-                      {Math.round(Number(pd)).toLocaleString("en-US")}
+                      {fmt(Number(pd))}
                     </span>
                   ))}
                 </span>
-                {suffix && <span className="text-gray-400 text-[10px] ml-0.5">{suffix}</span>}
+                {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
               </span>
             )
           }
           return (
-            <span style={TABULAR_NUMS} title={basis === "PROJECTED" ? "Projected census" : "Actual census"}>
-              {Math.round(val).toLocaleString("en-US")}{suffix && <span className="text-gray-400 text-[10px] ml-0.5">{suffix}</span>}
+            <span
+              style={TABULAR_NUMS}
+              title={censusBasisKind === "PROJECTED" ? "Projected census" : "Actual census"}
+            >
+              {fmt(Number(val))}
+              {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
             </span>
           )
         },
