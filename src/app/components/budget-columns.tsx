@@ -397,7 +397,12 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
           }
           const fmt = (n: number) => Math.round(n).toLocaleString("en-US")
 
-          // ---- Branch 1: gl_applicability → filtered types + scoped indicator. ----
+          // ---- Branch 1: gl_applicability → compact (TYPES) TOTAL format. ----
+          // Round 4e: redesigned per UX feedback. The per-type breakdown for the
+          // parent facility is already in the KPI header annotation, so repeating
+          // it stacked per-row was noise. The row carries the actual PPD denominator
+          // (the total) and a label showing which census types contribute.
+          // Italic types remain the scope indicator.
           if (basis === "gl_applicability" && byType && Array.isArray(applicable)) {
             const includedEntries: Array<[string, number]> = applicable
               .map((t: string) => [t, Number(byType[t] ?? 0)] as [string, number])
@@ -419,41 +424,31 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
 
             if (includedEntries.length === 0) {
               // Edge case: applicable types exist but in-scope PD for them is 0
-              // (Alderwood-AL × SNF-only GL). Render em dash + tooltip.
+              // (e.g., Alderwood-AL × SNF-only GL). Render em dash + tooltip.
               return (
                 <span className="text-gray-400" style={TABULAR_NUMS} title={tooltip}>
                   —
                 </span>
               )
             }
-            if (includedEntries.length === 1) {
-              // Single applicable type with PD > 0 — single-line render.
-              const [type, pd] = includedEntries[0]
-              return (
-                <span style={TABULAR_NUMS} title={tooltip} className="cursor-help">
-                  <span className="text-gray-500 italic mr-1">{type}</span>
-                  {fmt(pd)}
-                  {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
-                </span>
-              )
-            }
-            // Multi-type — stacked render, italicized type labels signal scoped.
+
+            // Compact (TYPES) TOTAL format — always parens, "+" separator,
+            // italic types, regular-weight total. Works for 1, 2, or 3 types.
+            const typeLabels = includedEntries.map(([t]) => t).join(" + ")
             return (
               <span style={TABULAR_NUMS} title={tooltip} className="cursor-help">
-                <span className="flex flex-col items-end leading-tight">
-                  {includedEntries.map(([type, pd]) => (
-                    <span key={type} className="text-[12px]">
-                      <span className="text-gray-500 italic mr-1">{type}</span>
-                      {fmt(pd)}
-                    </span>
-                  ))}
-                </span>
+                <span className="text-gray-500 italic mr-1">({typeLabels})</span>
+                {fmt(includedSum)}
                 {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
               </span>
             )
           }
 
           // ---- Branch 2: full_scope (or legacy/undefined basis). ----
+          // Round 4e: at fac-root, each row is a different facility with its
+          // own composition — keep the per-type stacked breakdown so users can
+          // compare facility shapes. Append a total line for the denominator
+          // the row's PPD math is using.
           const val = info.getValue()
           if (val == null) return <span className="text-gray-300">--</span>
           const nonZeroTypes = byType
@@ -476,6 +471,9 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
                       {fmt(Number(pd))}
                     </span>
                   ))}
+                  <span className="text-[12px] border-t border-gray-200 mt-0.5 pt-0.5">
+                    {fmt(fullSum)}
+                  </span>
                 </span>
                 {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
               </span>
