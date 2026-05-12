@@ -351,13 +351,16 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
   )
 
   // Census column — PPD metric only. Round 4c: shown on all PPD drills (was
-  // gated to facility-pivot in Round 3.5). Cell renders one of three forms
-  // based on row._ppdCalculationBasis (emitted by v71+ engine):
+  // gated to facility-pivot in Round 3.5). Round 4d: removed the dead
+  // "not_applicable" branch — every GL now has applicable types per the
+  // governance correction. Cell renders one of two forms based on
+  // row._ppdCalculationBasis (emitted by v72+ engine):
   //
-  //   - "not_applicable" (overhead GL) — muted em dash, tooltip explains.
   //   - "gl_applicability" — only applicable types from _personDaysByType,
   //     subtle scoped indicator (italicized type labels), tooltip itemizes
-  //     included/excluded types + person-days per directive format.
+  //     included/excluded types + person-days per directive format. Edge case:
+  //     applicable types ∩ facility types = 0 → render `—` with the same
+  //     directive-format tooltip (the Included/Excluded breakdown explains).
   //   - "full_scope" or undefined — current Round 3 stacked-type rendering
   //     (full breakdown, no narrowing).
   //
@@ -374,7 +377,7 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
         enableSorting: true,
         cell: (info: any) => {
           const row = info.row.original
-          const basis: "full_scope" | "gl_applicability" | "not_applicable" | undefined =
+          const basis: "full_scope" | "gl_applicability" | undefined =
             row._ppdCalculationBasis
           const censusBasisKind = row.censusBasis
           const projectedSuffix = censusBasisKind === "PROJECTED" ? "P" : ""
@@ -394,20 +397,7 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
           }
           const fmt = (n: number) => Math.round(n).toLocaleString("en-US")
 
-          // ---- Branch 1: overhead → muted em dash. ----
-          if (basis === "not_applicable") {
-            return (
-              <span
-                className="text-gray-400"
-                style={TABULAR_NUMS}
-                title={"No census denominator applies to this GL"}
-              >
-                —
-              </span>
-            )
-          }
-
-          // ---- Branch 2: gl_applicability → filtered types + scoped indicator. ----
+          // ---- Branch 1: gl_applicability → filtered types + scoped indicator. ----
           if (basis === "gl_applicability" && byType && Array.isArray(applicable)) {
             const includedEntries: Array<[string, number]> = applicable
               .map((t: string) => [t, Number(byType[t] ?? 0)] as [string, number])
@@ -463,7 +453,7 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
             )
           }
 
-          // ---- Branch 3: full_scope (or legacy/undefined basis). ----
+          // ---- Branch 2: full_scope (or legacy/undefined basis). ----
           const val = info.getValue()
           if (val == null) return <span className="text-gray-300">--</span>
           const nonZeroTypes = byType

@@ -173,15 +173,15 @@ export function EnterpriseGrid<T>({ table, gridState, onGridStateChange, viewSta
   const rows = table.getRowModel().rows
 
   // Round 4c — derive GL-in-scope signal for KPI annotation gating. Per
-  // directive, the GL applicability annotation appears when:
-  //   - GL is grouped (groupBy=gl, rows have basis=gl_applicability or not_applicable)
+  // directive, the annotation appears when:
+  //   - GL is grouped (groupBy=gl, rows have basis=gl_applicability)
   //   - OR a GL filter exists (same row signal)
   //   - OR any visible row has gl_applicability basis
-  // All three reduce to: at least one visible row has basis in
-  // {gl_applicability, not_applicable}.
+  // All three reduce to: at least one visible row has basis=gl_applicability.
+  // Round 4d simplified: not_applicable was removed from the basis enum, so
+  // gl_applicability is the only signal needed.
   const hasAnyGlScopedRow = rows.some(r => {
-    const basis = (r.original as any)?._ppdCalculationBasis
-    return basis === "gl_applicability" || basis === "not_applicable"
+    return (r.original as any)?._ppdCalculationBasis === "gl_applicability"
   })
 
   // Round 4c — dev-mode drift detector. Asserts engine ↔ UI invariant:

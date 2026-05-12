@@ -273,7 +273,7 @@ type TableRowWithEntity = TableRow & {
   // Round 4b: GL applicability contract (Path B math-aware mode)
   _applicableCensusTypes?: string[] | null
   _nonApplicablePersonDays?: number
-  _ppdCalculationBasis?: "full_scope" | "gl_applicability" | "not_applicable"
+  _ppdCalculationBasis?: "full_scope" | "gl_applicability"
 }
 
 function mapRowWithEntity(r: ReportRow, entityType: string, index: number): TableRowWithEntity {
