@@ -372,8 +372,10 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
       col.accessor("censusValue", {
         header: "Census",
         meta: { numeric: true },
-        size: 130,
-        minSize: 90,
+        // Round 4e: bumped from 130 → 180 to accommodate compact
+        // gl_applicability format like "(AL + IL + SNF) 125,124" at gl-root.
+        size: 180,
+        minSize: 140,
         enableSorting: true,
         cell: (info: any) => {
           const row = info.row.original
