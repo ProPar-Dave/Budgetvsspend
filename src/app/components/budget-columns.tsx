@@ -343,10 +343,16 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
     ),
   )
 
-  // Census column — PPD metric only. Round 3: shown on all PPD drills (was
-  // facility-pivot-only). Renders cumulative person-days for the timeframe;
-  // for multi-type CCRCs, renders stacked per-type breakdown.
-  if (!showTransactionCols && isPpd) {
+  // Census column — PPD metric only. Round 3.5: gated to facility-pivot views
+  // (groupBy=facility), where each row IS a different facility and the per-row
+  // breakdown carries real per-row variation. At GL-pivot / vendor-pivot views
+  // (portfolio-shared denominator per BVS Reporting Contract), every row would
+  // share the same denominator — displaying it per-row creates a misleading
+  // implication of per-row applicability. Doctrine: PPD denominator is
+  // determined by explicit facility filter scope, not row identity. The shared
+  // denominator + breakdown is surfaced once in the KPI annotation header for
+  // those views instead.
+  if (isFacilityView && !showTransactionCols && isPpd) {
     cols.push(
       col.accessor("censusValue", {
         header: "Census",

@@ -618,6 +618,35 @@ export function EnterpriseGrid<T>({ table, gridState, onGridStateChange, viewSta
           <div className="flex items-end ml-2">
             <div className="text-[10px] text-gray-400 pb-0.5 cursor-default" title="Total person-days used as PPD denominator">
               Based on {Math.round(kpi.totalPersonDays!).toLocaleString("en-US")} person-days
+              {/* Round 3.5: per-type breakdown when multi-type. Surfaces the
+                  shared denominator's composition once in the header, where it
+                  describes the actual PPD denominator governing every row's
+                  math (instead of repeating identical breakdowns per row). */}
+              {(() => {
+                const byType = (kpi as any).personDaysByType as Record<string, number> | undefined
+                if (!byType) return null
+                const entries = Object.entries(byType).filter(([, pd]) => Number(pd) > 0)
+                if (entries.length < 2) return null
+                const order = ["AL", "IL", "SNF"]
+                entries.sort(([a], [b]) => {
+                  const ai = order.indexOf(a)
+                  const bi = order.indexOf(b)
+                  if (ai !== -1 && bi !== -1) return ai - bi
+                  if (ai !== -1) return -1
+                  if (bi !== -1) return 1
+                  return a.localeCompare(b)
+                })
+                return (
+                  <span className="ml-1">
+                    · {entries.map(([t, pd], i) => (
+                      <span key={t}>
+                        {i > 0 && <span className="text-gray-300 mx-1">/</span>}
+                        <span className="text-gray-500">{t}</span> {Math.round(Number(pd)).toLocaleString("en-US")}
+                      </span>
+                    ))}
+                  </span>
+                )
+              })()}
               {kpi.projectionStatus === "ObservedAndProjected" && (
                 <span className="text-amber-500 ml-1">(includes projected census)</span>
               )}
