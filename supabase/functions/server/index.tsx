@@ -10,9 +10,12 @@ import {
   getFacilityNames as bvsGetFacilityNames,
   buildPeriodBreakdown,
   buildSparklineData,
+  attachRowPPD,
 } from "./bvs-queries.tsx";
 import type { SpendMode } from "./bvs-queries.tsx";
 import { resolveDateRange, yearRange } from "./bvs-queries.tsx";
+// Ship 5 Phase 2: BVS Query Engine (Perspective-Based)
+import { runDrillEngine, parseDrillRequest, runDrillPeriodsEngine, parseDrillPeriodsRequest } from "./bvs-drill-engine.tsx";
 
 // Ship 4a: strip enriched fields from a view result for the legacy shape.
 // Mutates in place for efficiency — the result object is about to be
@@ -32,6 +35,598 @@ function stripEnrichedFields(result: any): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4b: engine → legacy view shape shim
+//
+// Bridges the gap between the canonical engine response (DrillResponse) and
+// the legacy view shape that the BVS adapter's transformRow/transformKpi
+// expect. Additive: original engine fields are preserved alongside their
+// legacy-named twins (e.g. `consumed` stays, `spend` is added). Mutates in
+// place; result is about to be serialized.
+//
+// Field deltas covered:
+//   view.kpi:  + percent (← variancePercent), + status, + reconciliation,
+//              + id, + viewId
+//   rows:      + entityId (← id), + spend (← consumed), capitalize entityType,
+//              + status, + childViewId, + viewId, defaults for po/invoice/txnType
+//   txn rows:  full remap — engine emits {amount, txnDate, reference,
+//              poNumber, invoiceNumber}; legacy expects {spend, lastTxnDate,
+//              label, po, invoice}
+//
+// Out of scope (graceful absence in adapter):
+//   - row.trendSpend / row.trendBudgetAvg (sparkline inline cache no-ops)
+//   - row.personDays per facility (passed through as undefined)
+//   - kpi.monthlyPersonDays, kpi.projectionStatus
+// ---------------------------------------------------------------------------
+
+const ENTITY_TYPE_LABEL: Record<string, string> = {
+  facility: "Facility",
+  gl: "GL Account",
+  vendor: "Vendor",
+  txn: "Transaction",
+};
+
+// Phase 4b QA — proper pluralization (engine's naive +s yielded "Facilitys").
+const PLURAL_LABEL_MAP: Record<string, string> = {
+  "Facility": "Facilities",
+  "GL Account": "GL Accounts",
+  "Vendor": "Vendors",
+  "Transaction": "Transactions",
+};
+function pluralizeLabel(label: string): string {
+  return PLURAL_LABEL_MAP[label] ?? `${label}s`;
+}
+
+// Map dimension id → its filter column on bvs.transactions.
+const DIM_TO_FILTER_COL: Record<string, string> = {
+  facility: "facility_id",
+  gl: "gl_account_id",
+  vendor: "vendor_id",
+};
+
+// Canonical drill orderings per perspective (mirrors PERSPECTIVE_DEFAULTS
+// in bvs-drill-registry.tsx). The engine planner rejects non-prefixes of
+// these; childViewIds must therefore follow these orderings exactly.
+const CANONICAL_ORDERING: Record<string, string[]> = {
+  facility: ["facility", "gl", "vendor", "txn"],
+  gl:       ["gl", "facility", "vendor", "txn"],
+  vendor:   ["vendor", "gl", "facility", "txn"],
+};
+
+// Map a groupBy dimension to the filter column the engine expects.
+const GROUPBY_FILTER_COL: Record<string, string> = {
+  facility: "facility_id",
+  gl: "gl_account_id",
+  vendor: "vendor_id",
+};
+
+// Phase 4b QA — resolve filter entity_ids to display labels for breadcrumb
+// and scope-label rendering. Returns a map keyed by filter column name to
+// the human-readable entity label. Single-value filters only (UI never
+// sends multi-value, matching legacy behavior). Three parallel PK lookups
+// over tiny dimension tables — sub-millisecond each.
+async function resolveFilterEntityLabels(
+  sql: any,
+  filterStack: Array<{ column: string; values: string[] }>,
+): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  const facId = filterStack.find(f => f.column === "facility_id" && f.values.length === 1)?.values[0];
+  const glId = filterStack.find(f => f.column === "gl_account_id" && f.values.length === 1)?.values[0];
+  const venId = filterStack.find(f => f.column === "vendor_id" && f.values.length === 1)?.values[0];
+
+  const [facRows, glRows, venRows] = await Promise.all([
+    facId ? sql`SELECT name FROM bvs.facilities WHERE id = ${facId}` : Promise.resolve([]),
+    glId ? sql`SELECT code, name FROM bvs.gl_accounts WHERE id = ${glId}` : Promise.resolve([]),
+    venId ? sql`SELECT name FROM bvs.vendors WHERE id = ${venId}` : Promise.resolve([]),
+  ]);
+
+  if (facRows[0]) result.facility_id = facRows[0].name;
+  if (glRows[0]) result.gl_account_id = `${glRows[0].code} - ${glRows[0].name}`;
+  if (venRows[0]) result.vendor_id = venRows[0].name;
+
+  return result;
+}
+
+// Legacy status labels — must match classifyStatus() in bvs-queries.tsx so
+// the adapter's downstream consumers (transform.tsx, UI status pills) see
+// the same values the legacy path produced. Thresholds match: variance% <
+// -5 ⇒ over_budget; > +5 ⇒ under_budget; otherwise on_track. Rows with
+// excluded=true always get "excluded". Rows with null variance% but
+// excluded=false get "on_track" — matches the legacy vendor-root
+// convention, where vendors carry no budget but are still rendered as
+// healthy ("on_track") rather than struck-through.
+function classifyStatusForShim(
+  variancePercent: number | null | undefined,
+  excluded: boolean,
+): string {
+  if (excluded) return "excluded";
+  if (variancePercent === null || variancePercent === undefined || !isFinite(variancePercent)) {
+    return "on_track";
+  }
+  if (variancePercent < -5) return "over_budget";
+  if (variancePercent > 5) return "under_budget";
+  return "on_track";
+}
+
+// Build a child viewId in the engine's drill: format using the perspective's
+// canonical ordering. Returns null when we're already at a leaf (txn) or
+// when the path is somehow off-canonical (defensive).
+//
+// Examples:
+//   path=["facility"], row=facA → "drill:facility.gl?facility_id=facA"
+//   path=["gl"], row=glA       → "drill:gl.facility?gl_account_id=glA"
+//   path=["vendor"], row=venA  → "drill:vendor.gl?vendor_id=venA"
+//   path=["facility","gl"] facility_id=facA, row=glA
+//                              → "drill:facility.gl.vendor?facility_id=facA&gl_account_id=glA"
+function buildChildViewIdForShim(
+  path: string[],
+  filterStack: Array<{ column: string; values: string[] }>,
+  rowEntityId: string,
+  groupBy: string,
+): string | null {
+  const perspective = path[0];
+  const canonical = CANONICAL_ORDERING[perspective];
+  if (!canonical) return null;
+  // Confirm current path is a prefix of canonical.
+  for (let i = 0; i < path.length; i++) {
+    if (path[i] !== canonical[i]) return null;
+  }
+  // Next dimension in the canonical ordering.
+  const nextDim = canonical[path.length];
+  if (!nextDim) return null;
+  // Build filter list: keep existing single-value filters, add row's entityId
+  // under the current groupBy's filter column. The engine's viewId format
+  // uses ?col=val&col=val (no brackets) — buildEngineUrl on the client
+  // re-encodes these into filter[col]=val for the actual request.
+  const filters: Array<[string, string]> = [];
+  for (const f of filterStack ?? []) {
+    if (f.values?.length === 1) filters.push([f.column, f.values[0]]);
+  }
+  const newFilterCol = GROUPBY_FILTER_COL[groupBy];
+  if (newFilterCol) filters.push([newFilterCol, rowEntityId]);
+  const filterPart = filters.length > 0
+    ? "?" + filters.map(([c, v]) => `${c}=${v}`).join("&")
+    : "";
+  const newPath = [...path, nextDim].join(".");
+  return `drill:${newPath}${filterPart}`;
+}
+
+// Round 2 — fetch per-type person-days for a set of facilities (or portfolio
+// when facilityIds === null). Returns { facility_id: { census_type: pd, ... } }.
+// Mirrors fetchFacilityPersonDays from bvs-queries.tsx but adds the type
+// grouping so CCRC facilities can be displayed as per-wing breakdowns. Single
+// DB roundtrip, sub-millisecond on the indexed (facility_id, effective_date)
+// columns. ACTUAL basis only — matches the existing PPD denominator policy.
+async function fetchPersonDaysByType(
+  sql: any,
+  startDate: string,
+  endDate: string,
+  facilityIds: string[] | null,
+): Promise<Record<string, Record<string, number>>> {
+  let scopeClause = "";
+  if (facilityIds !== null) {
+    if (facilityIds.length === 0) return {};
+    const list = facilityIds.map(s => `'${s}'`).join(", ");
+    scopeClause = ` AND cd.facility_id IN (${list})`;
+  }
+  const rows = await sql.unsafe(`
+    SELECT cd.facility_id, cd.census_type, SUM(cd.value) AS person_days
+    FROM bvs.census_daily cd
+    WHERE cd.effective_date >= '${startDate}'::date
+      AND cd.effective_date <= '${endDate}'::date
+      AND cd.basis = 'ACTUAL'
+      ${scopeClause}
+    GROUP BY cd.facility_id, cd.census_type
+  `);
+  const result: Record<string, Record<string, number>> = {};
+  for (const r of rows) {
+    const fid = String(r.facility_id);
+    if (!result[fid]) result[fid] = {};
+    result[fid][String(r.census_type)] = Number(r.person_days ?? 0);
+  }
+  return result;
+}
+
+// Round 4b — fetch GL census applicability for the GLs in scope. Returns a
+// deterministic per-GL lookup of { classification, applicableTypes }. Used
+// when groupBy === 'gl' OR filterStack pins a GL — to narrow each row's PPD
+// denominator to only the applicable census types per the BVS Reporting
+// Contract extension for GL applicability (Path B math-aware mode).
+//
+// Map.get(unknownId) === undefined is the fall-back signal — caller emits a
+// structured warning that includes the GL id, code, and name for grep-based
+// verification, then falls back to universal (full scope).
+async function fetchGlApplicabilityMap(
+  sql: any,
+  glIds: string[],
+): Promise<Map<string, { classification: "universal" | "partial"; applicableTypes: string[]; code: string; name: string }>> {
+  const out = new Map<string, { classification: "universal" | "partial"; applicableTypes: string[]; code: string; name: string }>();
+  if (glIds.length === 0) return out;
+  const list = glIds.map(s => `'${s}'`).join(", ");
+  const rows = await sql.unsafe(`
+    SELECT g.id::text AS gl_id, g.code, g.name,
+           g.census_classification AS classification,
+           COALESCE(
+             ARRAY_AGG(t.census_type ORDER BY t.census_type) FILTER (WHERE t.census_type IS NOT NULL),
+             '{}'::text[]
+           ) AS applicable_types
+    FROM bvs.gl_accounts g
+    LEFT JOIN bvs.gl_applicable_census_types t ON t.gl_account_id = g.id
+    WHERE g.id IN (${list})
+    GROUP BY g.id, g.code, g.name, g.census_classification
+  `);
+  for (const r of rows) {
+    const classification = String(r.classification ?? "") as "universal" | "partial";
+    const applicableTypes: string[] = Array.isArray(r.applicable_types)
+      ? r.applicable_types.map((t: any) => String(t))
+      : [];
+    out.set(String(r.gl_id), {
+      classification,
+      applicableTypes,
+      code: String(r.code ?? ""),
+      name: String(r.name ?? ""),
+    });
+  }
+  return out;
+}
+
+async function shimEngineToLegacy(
+  sql: any,
+  result: any,
+  request: {
+    path: string[];
+    filterStack: Array<{ column: string; values: string[] }>;
+    timeframe: { start: string; end: string };
+  },
+): Promise<void> {
+  if (!result?.view?.kpi || !Array.isArray(result?.rows)) return;
+
+  const path = request.path;
+  const perspective = path[0];
+  const groupBy = path[path.length - 1];
+  const viewId = result.view.id;
+
+  // Phase 4b QA — resolve filtered entity_ids to display labels.
+  const entityLabels = await resolveFilterEntityLabels(sql, request.filterStack);
+
+  // ---- View labels (fix #1 "Facilitys", part of fix #2) -------------------
+  // scopeLabel:
+  //   - At root (path.length === 1): pluralized perspective name (e.g. "Facilities")
+  //   - At drill: "{groupBy plural} within {parent entity label}"
+  //     (mirrors legacy `GL Accounts within ${facName}` convention)
+  // entityTypeLabel: pluralized groupBy (e.g. "GL Accounts"), used for
+  //   column header.
+  const groupByLabel = ENTITY_TYPE_LABEL[groupBy] ?? groupBy;
+  const groupByPlural = pluralizeLabel(groupByLabel);
+  const perspectivePlural = pluralizeLabel(ENTITY_TYPE_LABEL[perspective] ?? perspective);
+
+  if (path.length === 1) {
+    result.view.scopeLabel = perspectivePlural;
+    result.view.entityTypeLabel = perspectivePlural;
+  } else {
+    const parentDim = path[path.length - 2];
+    const parentCol = DIM_TO_FILTER_COL[parentDim];
+    const parentLabel = entityLabels[parentCol]
+      ?? ENTITY_TYPE_LABEL[parentDim]
+      ?? parentDim;
+    result.view.scopeLabel = `${groupByPlural} within ${parentLabel}`;
+    result.view.entityTypeLabel = groupByPlural;
+  }
+
+  // ---- Breadcrumbs (fix #2) -----------------------------------------------
+  // Engine's buildBreadcrumbs emitted dimension type names ("GL Accounts" for
+  // the root crumb when drilled, "GL Account" for current). Rewrite using:
+  //   - Crumb 0: pluralized perspective name (e.g. "Facilities")
+  //   - Crumb i (i > 0): entity name of filter applied at path[i-1]
+  //     (e.g. "SNF - Kingswood Skilled Nursing - Lansing")
+  if (Array.isArray(result.breadcrumbs)) {
+    for (let i = 0; i < result.breadcrumbs.length; i++) {
+      const crumb = result.breadcrumbs[i];
+      if (i === 0) {
+        crumb.label = perspectivePlural;
+      } else {
+        const filterDim = path[i - 1];
+        const filterCol = DIM_TO_FILTER_COL[filterDim];
+        crumb.label = entityLabels[filterCol]
+          ?? ENTITY_TYPE_LABEL[filterDim]
+          ?? filterDim;
+      }
+    }
+  }
+
+  // ---- KPI ----------------------------------------------------------------
+  const kpi = result.view.kpi;
+  const included = result.rows.filter((r: any) => !r.excluded);
+  const excluded = result.rows.filter((r: any) => r.excluded);
+  kpi.percent = kpi.variancePercent;
+  // KPI is "excluded" only when variancePercent is null (no budget). Otherwise
+  // apply normal thresholds. Excluded flag on a KPI is not meaningful (it's
+  // a row-level concept), so we pass excluded=false.
+  kpi.status = classifyStatusForShim(kpi.percent, false);
+  kpi.reconciliation = {
+    kpiId: `bvs-kpi-${viewId}`,
+    rowCount: result.rows.length,
+    includedRows: included.length,
+    excludedRows: excluded.length,
+    checksum: `bvs-${result.rows.length}-${kpi.budget}`,
+  };
+  if (!kpi.id) kpi.id = `bvs-kpi-${viewId}`;
+  if (!kpi.viewId) kpi.viewId = viewId;
+
+  // ---- Rows ----------------------------------------------------------------
+  if (groupBy === "txn") {
+    // Engine txn shape: { id, txnDate, amount, committed, excluded,
+    //                     glExcluded, reference, poNumber, invoiceNumber, txnType }
+    // Legacy txn shape used by transform.tsx.
+    result.rows = result.rows.map((r: any) => ({
+      id: r.id,
+      viewId,
+      entityType: "Transaction",
+      entityId: r.id,
+      label: r.reference || `TXN-${r.id}`,
+      budget: null,
+      spend: Number(r.amount ?? 0),
+      committed: Number(r.committed ?? 0),
+      variance: null,
+      variancePercent: null,
+      status: "on_track",
+      excluded: Boolean(r.excluded || r.glExcluded),
+      childViewId: null,
+      po: r.poNumber ?? null,
+      invoice: r.invoiceNumber ?? null,
+      txnType: r.txnType ?? null,
+      lastTxnDate: r.txnDate ?? null,
+      // Preserve original engine fields for any downstream that wants them.
+      txnDate: r.txnDate ?? null,
+      amount: r.amount,
+      reference: r.reference,
+      poNumber: r.poNumber,
+      invoiceNumber: r.invoiceNumber,
+      glExcluded: Boolean(r.glExcluded),
+    }));
+  } else {
+    // Non-txn: alias fields, derive childViewId, capitalize entityType.
+    for (const row of result.rows) {
+      const engineEntityId = String(row.id);
+      row.entityId = engineEntityId;
+      row.spend = row.consumed;
+      row.entityType = ENTITY_TYPE_LABEL[row.entityType] ?? row.entityType;
+      row.status = classifyStatusForShim(row.variancePercent, Boolean(row.excluded));
+      row.childViewId = buildChildViewIdForShim(
+        path,
+        request.filterStack,
+        engineEntityId,
+        groupBy,
+      );
+      if (row.po === undefined) row.po = null;
+      if (row.invoice === undefined) row.invoice = null;
+      if (row.txnType === undefined) row.txnType = null;
+      row.viewId = viewId;
+    }
+    // Phase 4b QA fix #5 — stable-sort: excluded rows always at the bottom.
+    // Engine returns rows in SQL natural order (excluded interleaved); the UI
+    // renders an "EXCLUDED ITEMS" section header whenever it encounters a run
+    // of excluded rows. Without this sort, drilled views show multiple
+    // "EXCLUDED ITEMS" headers throughout the table. JS Array.sort is stable
+    // in modern engines, so within each group the engine's row order is
+    // preserved.
+    result.rows.sort((a: any, b: any) => (a.excluded ? 1 : 0) - (b.excluded ? 1 : 0));
+
+    // Round 2 — attach per-type person-days for the Census column. Mirrors
+    // the engine's attachPPDFromPlan facilityIds resolution so each row gets
+    // the right scope:
+    //   - groupBy=facility (fac-root, gl.facility, vendor.facility): each row
+    //     gets its own facility's per-type breakdown.
+    //   - facility filter present (facility.gl, facility.gl.vendor): all rows
+    //     inherit the parent facility's per-type breakdown.
+    //   - portfolio-shared (gl-root, vendor-root) and subset-scoped views: all
+    //     rows share the aggregated per-type breakdown across queried
+    //     facilities. (For portfolio-shared, that's the whole portfolio.)
+    // censusValue mirrors personDays (= cumulative PD for the timeframe) per
+    // the agreed display convention ("sum of days in a range is the person
+    // days that we'll call census"). personDaysByType is the new field the
+    // client column reads to render multi-type CCRC breakdowns.
+    const facilityFilter = request.filterStack.find(f => f.column === "facility_id");
+    let pdScopeIds: string[] | null = null;
+    if (facilityFilter) {
+      pdScopeIds = facilityFilter.values;
+    } else if (groupBy === "facility") {
+      pdScopeIds = result.rows.map((r: any) => String(r.entityId ?? r.id));
+    }
+    // pdScopeIds === null → portfolio scope (gl-root, vendor-root, etc.)
+
+    const pdByType = await fetchPersonDaysByType(
+      sql,
+      request.timeframe.start,
+      request.timeframe.end,
+      pdScopeIds,
+    );
+
+    // Aggregate across all queried facilities (used for shared-scope rows and
+    // for the KPI personDaysByType).
+    const aggregateByType: Record<string, number> = {};
+    for (const fid of Object.keys(pdByType)) {
+      for (const [ctype, pd] of Object.entries(pdByType[fid])) {
+        aggregateByType[ctype] = (aggregateByType[ctype] ?? 0) + pd;
+      }
+    }
+    const aggregateTotal = Object.values(aggregateByType).reduce(
+      (a, b) => a + b,
+      0,
+    );
+
+    if (groupBy === "facility") {
+      // Each row IS a facility — use its own breakdown.
+      for (const row of result.rows) {
+        const fid = String(row.entityId ?? row.id);
+        const byType = pdByType[fid] ?? {};
+        const total = Object.values(byType).reduce((a, b) => a + b, 0);
+        row.personDaysByType = byType;
+        row.personDays = total;
+        row.censusValue = total;
+        row.censusBasis = "ACTUAL";
+      }
+    } else if (facilityFilter && facilityFilter.values.length === 1) {
+      // Single-facility drill — every row inherits the parent's breakdown.
+      const fid = facilityFilter.values[0];
+      const byType = pdByType[fid] ?? {};
+      const total = Object.values(byType).reduce((a, b) => a + b, 0);
+      for (const row of result.rows) {
+        row.personDaysByType = byType;
+        row.personDays = total;
+        row.censusValue = total;
+        row.censusBasis = "ACTUAL";
+      }
+    } else {
+      // Portfolio-shared or subset-scoped — every row shares the aggregate.
+      for (const row of result.rows) {
+        row.personDaysByType = aggregateByType;
+        row.personDays = aggregateTotal;
+        row.censusValue = aggregateTotal;
+        row.censusBasis = "ACTUAL";
+      }
+    }
+
+    // KPI gets the aggregate (sum across queried facilities). For
+    // facility-scoped drills this equals the parent facility's breakdown;
+    // for portfolio views it equals the portfolio breakdown.
+    result.view.kpi.personDaysByType = aggregateByType;
+
+    // Round 4b — Math-aware GL applicability (Path B per BVS Reporting
+    // Contract extension). When a GL is in scope (groupBy === 'gl' OR
+    // filterStack pins a gl_account_id), narrow each row's PPD denominator
+    // to only the census types applicable to that row's GL, then re-attach
+    // PPD with the new denominator.
+    //
+    // KPI math is UNCHANGED — KPI uses the full facility/timeframe scope
+    // denominator per directive. Row-level reconciliation is intentionally
+    // not expected to equal KPI in this mode; aggregate vs row PPD answer
+    // different questions and the annotation copy explains the distinction.
+    //
+    // Contract emitted per non-txn row:
+    //   _applicableCensusTypes   — list ['AL','SNF',...] (always ≥1 type per
+    //                              Round 4d governance: every GL has applicable
+    //                              types) or null when no GL is in scope
+    //   _personDays              — final denominator used (applicable sum, or
+    //                              full sum for full_scope rows, or full sum
+    //                              for fallback rows when applicable ∩ facility = ∅)
+    //   _personDaysByType        — full scoped breakdown (NOT filtered — UI
+    //                              derives filtered view at render time)
+    //   _nonApplicablePersonDays — sum of types excluded by applicability,
+    //                              0 for universal/full_scope/fallback
+    //   _ppdCalculationBasis     — 'gl_applicability' | 'gl_applicability_fallback' | 'full_scope'
+    //                              fallback occurs when applicable ∩ facility = ∅
+    //                              but the facility has census; per Round 4f
+    //                              "no null person days" rule
+    const glFilter = request.filterStack.find(f => f.column === "gl_account_id");
+    const isGlInScope = groupBy === "gl" || !!glFilter;
+
+    if (isGlInScope) {
+      // Collect all GL IDs needed for applicability lookup.
+      const glIds = new Set<string>();
+      if (glFilter) {
+        for (const v of glFilter.values) glIds.add(String(v));
+      }
+      if (groupBy === "gl") {
+        for (const row of result.rows) {
+          const id = row.entityId ?? row.id;
+          if (id) glIds.add(String(id));
+        }
+      }
+
+      const applicabilityMap = await fetchGlApplicabilityMap(sql, Array.from(glIds));
+
+      for (const row of result.rows) {
+        // Determine this row's GL identity. For groupBy=gl, the row IS the
+        // GL. For groupBy=facility/vendor with a gl filter, all rows share
+        // the filter's GL identity.
+        const glId =
+          groupBy === "gl"
+            ? String(row.entityId ?? row.id)
+            : String(glFilter!.values[0]);
+
+        const apply = applicabilityMap.get(glId);
+        const byType = (row.personDaysByType ?? {}) as Record<string, number>;
+        const fullSum = Object.values(byType).reduce((a, b) => a + Number(b), 0);
+
+        if (!apply) {
+          // Missing applicability mapping — fall back to universal/full-scope
+          // with structured warning. seed coverage should be 100%, so this
+          // only fires if a new GL is added without curation.
+          console.warn(
+            `[bvs.applicability.missing] gl_id=${glId} — no row in bvs.gl_accounts.census_classification; falling back to full_scope. Add a classification row to fix.`
+          );
+          row._applicableCensusTypes = null;
+          row._nonApplicablePersonDays = 0;
+          row._ppdCalculationBasis = "full_scope";
+          // personDays + PPD unchanged from v70 logic above.
+          continue;
+        }
+
+        // universal or partial — narrow denominator to applicable types.
+        // Round 4d governance correction removed the "overhead" classification:
+        // every GL must have ≥1 applicable type, so this branch handles all GLs.
+        // Exclusion (not applicability) is the mechanism for "no PPD math".
+        const applicableTypes = apply.applicableTypes;
+        const applicableSum = applicableTypes.reduce(
+          (sum, t) => sum + (Number(byType[t]) || 0),
+          0,
+        );
+
+        if (applicableSum > 0) {
+          // Normal case: applicable types ∩ facility types ≠ ∅.
+          const nonApplicable = fullSum - applicableSum;
+          row._applicableCensusTypes = applicableTypes;
+          row._nonApplicablePersonDays = nonApplicable;
+          row._ppdCalculationBasis = "gl_applicability";
+          row.personDays = applicableSum;
+          row.censusValue = applicableSum;
+          attachRowPPD(row, applicableSum);
+        } else if (fullSum > 0) {
+          // Round 4f fallback: applicable types ∩ facility types = ∅ (e.g.,
+          // AL+SNF partial GL at IL-only facility). Per directive "Ensure
+          // there are no null person days anywhere": fall back to the
+          // facility's available census as the denominator. The GL's
+          // applicability metadata is preserved (so the row contract still
+          // tells consumers what the GL is *meant* to apply to), but the
+          // math uses what's actually present at this facility.
+          row._applicableCensusTypes = applicableTypes;
+          row._nonApplicablePersonDays = 0;
+          row._ppdCalculationBasis = "gl_applicability_fallback";
+          row.personDays = fullSum;
+          row.censusValue = fullSum;
+          attachRowPPD(row, fullSum);
+        } else {
+          // Edge case: facility has zero PD across all census types for the
+          // selected timeframe. Truly no census available — this is the
+          // "null error" case (David: "Only when no census is available
+          // should a GL have a null error"). Should not occur in practice
+          // for the seeded data. Defensive: emit warning, leave row null.
+          console.warn(
+            `[bvs.applicability.no_census] facility has zero PD across all census types for timeframe — leaving row with null PPD`,
+          );
+          row._applicableCensusTypes = applicableTypes;
+          row._nonApplicablePersonDays = 0;
+          row._ppdCalculationBasis = "gl_applicability";
+          row.personDays = 0;
+          row.censusValue = 0;
+          attachRowPPD(row, 0);
+        }
+      }
+    } else {
+      // No GL in scope — every row uses the full facility/timeframe scope
+      // denominator already set by v70 logic above. Just mark the basis so
+      // the client can render consistent annotations.
+      for (const row of result.rows) {
+        row._applicableCensusTypes = null;
+        row._nonApplicablePersonDays = 0;
+        row._ppdCalculationBasis = "full_scope";
+        // personDays / personDaysByType / PPD unchanged.
+      }
+    }
+  }
+}
+
 const app = new Hono();
 
 // Enable logger
@@ -44,7 +639,7 @@ app.use(
     origin: "*",
     allowHeaders: ["Content-Type", "Authorization"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    exposeHeaders: ["Content-Length", "X-BVS-Response-Shape"],
+    exposeHeaders: ["Content-Length", "X-BVS-Response-Shape", "X-BVS-Engine"],
     maxAge: 600,
   }),
 );
@@ -588,17 +1183,23 @@ app.get("/make-server-b98afb97/bvs/report/view/:viewId/periods", async (c) => {
 
     const sql = await getBvsSql();
     const anchorYear = await getAnchorYear(sql);
-    const { startDate, endDate } = resolveDateRange(
+    const { startDate, endDate, isEnriched } = resolveDateRange(
       c.req.query("start"),
       c.req.query("end"),
       c.req.query("year"),
       anchorYear,
     );
 
-    console.log(`BVS periods: viewId=${viewId}, viewBy=${viewBy}, range=${startDate}..${endDate}, spendMode=${sm}`);
-    const periods = await buildPeriodBreakdown(sql, viewId, viewBy, startDate, endDate, sm);
+    console.log(`BVS periods: viewId=${viewId}, viewBy=${viewBy}, range=${startDate}..${endDate}, spendMode=${sm}, enriched=${isEnriched}`);
+    // Ship 4c: when isEnriched, period buckets carry server-computed PPD via
+    // the V3 doctrine denominator. Legacy callers (no start/end) get the
+    // pre-4c shape — no PPD fields, no v2 header.
+    const periods = await buildPeriodBreakdown(sql, viewId, viewBy, startDate, endDate, sm, isEnriched);
     console.log(`BVS periods: ${Object.keys(periods).length} entities returned`);
 
+    if (isEnriched) {
+      c.header("X-BVS-Response-Shape", "v2");
+    }
     return c.json({ viewId, viewBy, startDate, endDate, periods });
   } catch (err: any) {
     console.log(`BVS period breakdown error for viewId=${c.req.param("viewId")}: ${err?.message ?? err}`);
@@ -658,6 +1259,117 @@ app.get("/make-server-b98afb97/bvs/report/diag", async (c) => {
     steps.stack = err?.stack ?? null;
     console.log(`BVS diag error: ${steps.error}`);
     return c.json({ status: "ERROR", steps }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ship 5 Phase 2 — BVS Query Engine (Perspective-Based) endpoint
+// ---------------------------------------------------------------------------
+//
+// Single endpoint serving all 12 valid drill paths via the planner +
+// renderer + column resolver. Parallel to existing per-path endpoints
+// (bvs/report/view/:viewId) — both serve the live UI through Phase 4
+// (adapter migration). Phase 6 retires the per-path endpoints.
+//
+// Query params:
+//   path        — dot-separated dimension chain (e.g. "facility.gl")
+//   filter[col] — comma-separated value(s) (e.g. filter[facility_id]=X)
+//   start, end  — ISO date strings
+//   spendMode   — totalImpact | actual | commitment (default totalImpact)
+//   debug       — "true" returns plan + SQL in response
+
+app.get("/make-server-b98afb97/bvs/drill", async (c) => {
+  try {
+    const url = new URL(c.req.url);
+    const sql = await getBvsSql();
+    // Phase 4 fix: anchor-year fallback for preload-time calls when timeframe
+    // hasn't yet been resolved client-side. Mirrors resolveDateRange behavior
+    // of the legacy per-path endpoints so the engine accepts the same shape
+    // during init (e.g. preloadRoots before user picks a timeframe).
+    if (!url.searchParams.get("start") || !url.searchParams.get("end")) {
+      const anchorYear = await getAnchorYear(sql);
+      const { startDate, endDate } = resolveDateRange(
+        url.searchParams.get("start") ?? undefined,
+        url.searchParams.get("end") ?? undefined,
+        url.searchParams.get("year") ?? undefined,
+        anchorYear,
+      );
+      url.searchParams.set("start", startDate);
+      url.searchParams.set("end", endDate);
+    }
+    const request = parseDrillRequest(url.searchParams);
+    if (!request) {
+      return c.json(
+        { error: "Invalid drill request: requires 'path' param" },
+        400,
+      );
+    }
+
+    const result = await runDrillEngine(sql, request);
+
+    // Phase 4b: shim engine response to legacy view shape for adapter compat.
+    // Additive — original engine fields preserved alongside legacy-named twins.
+    // Phase 4b QA — now async to resolve filter entity labels for breadcrumbs
+    // and scope labels (DB lookup on dimension tables).
+    await shimEngineToLegacy(sql, result, request);
+
+    c.header("X-BVS-Response-Shape", "v2");
+    c.header("X-BVS-Engine", "drill-engine-v1.0.0");
+    return c.json(result);
+  } catch (err: any) {
+    const path = c.req.query("path") ?? "(none)";
+    console.log(`BVS drill engine error for path=${path}: ${err?.message ?? err}`);
+    console.log(`BVS drill stack: ${err?.stack ?? "no stack"}`);
+    return c.json(
+      { error: `Drill engine error: ${err?.message ?? err}`, path },
+      500,
+    );
+  }
+});
+
+// Phase 4 — Engine periods route. Same path/filter[]/start/end/spendMode contract
+// as /bvs/drill plus required `viewBy` (monthly | quarterly). Validates the
+// drill path through the planner (Cross-Perspective Numerical Invariance), then
+// delegates to buildPeriodBreakdown via engineToLegacyViewId translation.
+// Supports all 12 valid drill paths including the 4 new Option B canonical
+// orderings (G→F, G→F→V, V→G, V→G→F) for which legacy /periods has no equivalent.
+app.get("/make-server-b98afb97/bvs/drill/periods", async (c) => {
+  try {
+    const url = new URL(c.req.url);
+    const sql = await getBvsSql();
+    // Phase 4 fix: anchor-year fallback (see /bvs/drill route comment).
+    if (!url.searchParams.get("start") || !url.searchParams.get("end")) {
+      const anchorYear = await getAnchorYear(sql);
+      const { startDate, endDate } = resolveDateRange(
+        url.searchParams.get("start") ?? undefined,
+        url.searchParams.get("end") ?? undefined,
+        url.searchParams.get("year") ?? undefined,
+        anchorYear,
+      );
+      url.searchParams.set("start", startDate);
+      url.searchParams.set("end", endDate);
+    }
+    const request = parseDrillPeriodsRequest(url.searchParams);
+    if (!request) {
+      return c.json(
+        { error: "Invalid drill periods request: requires 'path', 'viewBy' (monthly|quarterly) params" },
+        400,
+      );
+    }
+
+    const result = await runDrillPeriodsEngine(sql, request);
+
+    c.header("X-BVS-Response-Shape", "v2");
+    c.header("X-BVS-Engine", "drill-engine-v1.0.0");
+    return c.json(result);
+  } catch (err: any) {
+    const path = c.req.query("path") ?? "(none)";
+    console.log(`BVS drill periods engine error for path=${path}: ${err?.message ?? err}`);
+    console.log(`BVS drill periods stack: ${err?.stack ?? "no stack"}`);
+    return c.json(
+      { error: `Drill periods engine error: ${err?.message ?? err}`, path },
+      500,
+    );
   }
 });
 

@@ -60,18 +60,21 @@ export function safePPD(
   return v / d;
 }
 
-type SqlClient = any;
+export type SqlClient = any;
 
 // Ship 4a: attach PPD fields to a row using its own personDays denominator.
 // Callers pass `personDays` explicitly so GL-root (shared portfolio PD) and
 // facility rows (per-facility PD) both work through one helper.
-function attachRowPPD(row: any, personDays: number | null | undefined): void {
-  row.spendPPD = safePPD(row.spend, personDays);
+// Phase 4b: dual-field read (row.spend ?? row.consumed) for engine compat
+// where KPI-shaped objects use `consumed` rather than `spend`.
+export function attachRowPPD(row: any, personDays: number | null | undefined): void {
+  const spendVal = row.spend ?? row.consumed;
+  row.spendPPD = safePPD(spendVal, personDays);
   row.budgetPPD = safePPD(row.budget, personDays);
   row.variancePPD = safePPD(row.variance, personDays);
 }
 
-function attachKpiPPD(kpi: any, personDays: number | null | undefined): void {
+export function attachKpiPPD(kpi: any, personDays: number | null | undefined): void {
   kpi.spendPPD = safePPD(kpi.consumed, personDays);
   kpi.budgetPPD = safePPD(kpi.budget, personDays);
   kpi.variancePPD = safePPD(kpi.variance, personDays);
@@ -120,7 +123,7 @@ async function getTxnColumns(sql: SqlClient): Promise<Set<string>> {
   return _txnColumnsCache;
 }
 
-function makeContext(pivot: string) {
+export function makeContext(pivot: string) {
   return {
     id: `bvs-ctx-${pivot}`,
     timeframeStart: "2025-01-01",
@@ -133,7 +136,7 @@ function makeContext(pivot: string) {
   };
 }
 
-function makeMeta() {
+export function makeMeta() {
   return {
     id: "bvs-meta-1",
     calculationEngineVersion: "BVS-live-1.0",
@@ -819,40 +822,25 @@ export async function buildGlRoot(sql: SqlClient, startDate: string, endDate: st
   // Spend from raw txn (Spend Mode authoritative source). Budget + excluded flag from MV.
   const txnSpend = txnSpendExpr(spendMode);
 
-  const [mvRows, rawSpendRows, glTrendRows, rawGlTrendRows, censusRows] = await Promise.all([
+  // Consolidated: derive totals from monthly trend rows (avoids duplicate full-table scans).
+  // Trend queries include both excluded and non-excluded GLs so we can split downstream.
+  const [glTrendRows, rawGlTrendRows, censusRows] = await Promise.all([
     sql.unsafe(`
-      SELECT mv.gl_account_id, mv.gl_excluded,
-        SUM(mv.budget_amount) AS total_budget
-      FROM bvs.mv_spend_budget_monthly mv
-      WHERE mv.month >= date_trunc('month', '${start}'::date)::date AND mv.month <= '${end}'::date
-      GROUP BY mv.gl_account_id, mv.gl_excluded
-    `),
-    sql.unsafe(`
-      SELECT t.gl_account_id, g.excluded AS gl_excluded,
-        SUM(${txnSpend}) AS total_spend,
-        SUM(t.amount_committed) AS total_committed
-      FROM bvs.transactions t
-      JOIN bvs.gl_accounts g ON g.id = t.gl_account_id
-      WHERE t.txn_date >= '${start}'::date AND t.txn_date <= '${end}'::date
-      GROUP BY t.gl_account_id, g.excluded
-    `),
-    sql.unsafe(`
-      SELECT mv.gl_account_id AS entity_id, mv.month,
+      SELECT mv.gl_account_id AS entity_id, mv.gl_excluded, mv.month,
         SUM(mv.budget_amount) AS budget
       FROM bvs.mv_spend_budget_monthly mv
-      WHERE mv.gl_excluded = false
-        AND mv.month >= date_trunc('month', '${start}'::date)::date AND mv.month <= '${end}'::date
-      GROUP BY mv.gl_account_id, mv.month
+      WHERE mv.month >= date_trunc('month', '${start}'::date)::date AND mv.month <= '${end}'::date
+      GROUP BY mv.gl_account_id, mv.gl_excluded, mv.month
       ORDER BY mv.month
     `),
     sql.unsafe(`
-      SELECT t.gl_account_id AS entity_id, DATE_TRUNC('month', t.txn_date) AS month,
-        SUM(${txnSpend}) AS spend
+      SELECT t.gl_account_id AS entity_id, g.excluded AS gl_excluded, DATE_TRUNC('month', t.txn_date) AS month,
+        SUM(${txnSpend}) AS spend,
+        SUM(t.amount_committed) AS committed
       FROM bvs.transactions t
       JOIN bvs.gl_accounts g ON g.id = t.gl_account_id
-      WHERE g.excluded = false
-        AND t.txn_date >= '${start}'::date AND t.txn_date <= '${end}'::date
-      GROUP BY t.gl_account_id, DATE_TRUNC('month', t.txn_date)
+      WHERE t.txn_date >= '${start}'::date AND t.txn_date <= '${end}'::date
+      GROUP BY t.gl_account_id, g.excluded, DATE_TRUNC('month', t.txn_date)
     `),
     sql.unsafe(`
       SELECT TO_CHAR(cd.effective_date, 'YYYY-MM') AS month,
@@ -863,9 +851,10 @@ export async function buildGlRoot(sql: SqlClient, startDate: string, endDate: st
       GROUP BY TO_CHAR(cd.effective_date, 'YYYY-MM')
     `),
   ]);
+  // Trend map (only non-excluded GLs participate in the budget trend display)
   const mergedGlTrendRows = [
-    ...glTrendRows.map((r: any) => ({ entity_id: r.entity_id, month: r.month, spend: 0, budget: Number(r.budget ?? 0) })),
-    ...rawGlTrendRows.map((r: any) => ({ entity_id: r.entity_id, month: r.month, spend: Number(r.spend ?? 0), budget: 0 })),
+    ...glTrendRows.filter((r: any) => !r.gl_excluded).map((r: any) => ({ entity_id: r.entity_id, month: r.month, spend: 0, budget: Number(r.budget ?? 0) })),
+    ...rawGlTrendRows.filter((r: any) => !r.gl_excluded).map((r: any) => ({ entity_id: r.entity_id, month: r.month, spend: Number(r.spend ?? 0), budget: 0 })),
   ];
   const glTrendMap = buildTrendMap(mergedGlTrendRows, year);
 
@@ -873,32 +862,33 @@ export async function buildGlRoot(sql: SqlClient, startDate: string, endDate: st
   for (const r of censusRows) portfolioMonthlyPd[r.month] = Number(r.person_days ?? 0);
   const portfolioTotalPd = Object.values(portfolioMonthlyPd).reduce((a, b) => a + b, 0);
 
+  // Derive per-GL totals from monthly trends
   const spendMap = new Map<string, { spend: number; committed: number }>();
   const budgetMap = new Map<string, number>();
   const exclMap = new Map<string, { spend: number; committed: number }>();
-  const rawSpendByGl = new Map<string, { spend: number; committed: number; excluded: boolean }>();
-  for (const r of rawSpendRows) {
-    rawSpendByGl.set(r.gl_account_id, {
-      spend: Number(r.total_spend ?? 0),
-      committed: Number(r.total_committed ?? 0),
-      excluded: !!r.gl_excluded,
-    });
+  const exclSet = new Set<string>();
+  for (const r of glTrendRows) {
+    const gid = r.entity_id;
+    if (r.gl_excluded) { exclSet.add(gid); continue; }
+    budgetMap.set(gid, (budgetMap.get(gid) ?? 0) + Number(r.budget ?? 0));
   }
-  for (const r of mvRows) {
-    const rs = rawSpendByGl.get(r.gl_account_id) ?? { spend: 0, committed: 0, excluded: r.gl_excluded };
+  for (const r of rawGlTrendRows) {
+    const gid = r.entity_id;
     if (r.gl_excluded) {
-      exclMap.set(r.gl_account_id, { spend: rs.spend, committed: rs.committed });
+      exclSet.add(gid);
+      const cur = exclMap.get(gid) ?? { spend: 0, committed: 0 };
+      cur.spend += Number(r.spend ?? 0);
+      cur.committed += Number(r.committed ?? 0);
+      exclMap.set(gid, cur);
     } else {
-      spendMap.set(r.gl_account_id, { spend: rs.spend, committed: rs.committed });
-      budgetMap.set(r.gl_account_id, Number(r.total_budget));
+      const cur = spendMap.get(gid) ?? { spend: 0, committed: 0 };
+      cur.spend += Number(r.spend ?? 0);
+      cur.committed += Number(r.committed ?? 0);
+      spendMap.set(gid, cur);
     }
   }
-  // Ensure excluded GLs with raw-txn activity but no MV row still appear
-  for (const [gid, rs] of rawSpendByGl) {
-    if (rs.excluded && !exclMap.has(gid)) {
-      exclMap.set(gid, { spend: rs.spend, committed: rs.committed });
-    }
-  }
+  // Ensure excluded GLs with no txn activity still appear with zeros
+  for (const gid of exclSet) if (!exclMap.has(gid)) exclMap.set(gid, { spend: 0, committed: 0 });
 
   const glAccounts = await sql`SELECT id, code, name, excluded FROM bvs.gl_accounts ORDER BY code`;
 
@@ -1452,7 +1442,7 @@ type PeriodPdFacility = Record<string, Record<string, number>>; // facilityId ->
  * (see lines ~278-285) so per-period and full-window denominators are
  * computed from the same underlying data.
  */
-async function fetchPeriodPersonDays(
+export async function fetchPeriodPersonDays(
   sql: SqlClient,
   trunc: string,
   gran: PeriodGranularity,
@@ -1460,7 +1450,7 @@ async function fetchPeriodPersonDays(
   endDate: string,
   scope: "portfolio",
 ): Promise<PeriodPdPortfolio>;
-async function fetchPeriodPersonDays(
+export async function fetchPeriodPersonDays(
   sql: SqlClient,
   trunc: string,
   gran: PeriodGranularity,
@@ -1468,7 +1458,7 @@ async function fetchPeriodPersonDays(
   endDate: string,
   scope: "facility",
 ): Promise<PeriodPdFacility>;
-async function fetchPeriodPersonDays(
+export async function fetchPeriodPersonDays(
   sql: SqlClient,
   trunc: string,
   gran: PeriodGranularity,
@@ -2087,4 +2077,169 @@ function assembleSparklines(spendRows: any[], budgetRows: any[], year: number, s
     }));
   }
   return result;
+}
+// ---------------------------------------------------------------------------
+// Engine helper: full-window per-facility person-days
+// (used by Ship 5 drill engine for one-shot denominator lookup)
+// ---------------------------------------------------------------------------
+export async function fetchFacilityPersonDays(
+  sql: SqlClient,
+  startDate: string,
+  endDate: string,
+  facilityIds: string[] | null,
+): Promise<Record<string, number>> {
+  let scopeClause = "";
+  if (facilityIds !== null) {
+    if (facilityIds.length === 0) return {};
+    const list = facilityIds.map(s => `'${s}'`).join(", ");
+    scopeClause = ` AND cd.facility_id IN (${list})`;
+  }
+  const rows = await sql.unsafe(`
+    SELECT cd.facility_id, SUM(cd.value) AS person_days
+    FROM bvs.census_daily cd
+    WHERE cd.effective_date >= '${startDate}'::date
+      AND cd.effective_date <= '${endDate}'::date
+      AND cd.basis = 'ACTUAL'
+      ${scopeClause}
+    GROUP BY cd.facility_id
+  `);
+  const result: Record<string, number> = {};
+  for (const r of rows) {
+    result[r.facility_id] = Number(r.person_days ?? 0);
+  }
+  return result;
+}
+// ============================================================================
+// Inlined drill registry (bundler can't resolve standalone bvs-drill-registry.tsx)
+// ============================================================================
+
+export type RoutingStrategy = "mv" | "raw" | "hybrid";
+export type PpdRule = "facility-scoped" | "subset-scoped" | "portfolio-shared" | "none";
+export type Perspective = "facility" | "gl" | "vendor";
+export type DimensionId = "facility" | "gl" | "vendor" | "txn" | "month";
+
+export type Filter = { column: string; values: string[] };
+export type Timeframe = { start: string; end: string };
+
+export type LabelJoin = {
+  table: string; alias: string; pkColumn: string; factColumn: string; labelColumns: string[];
+};
+
+export type DimensionDef = {
+  id: DimensionId;
+  label: string;
+  source: "mv" | "raw";
+  ppdRule: PpdRule;
+  filterColumn?: string;
+  labelJoin?: LabelJoin;
+};
+
+const DIMENSIONS_REGISTRY: Record<DimensionId, DimensionDef> = {
+  facility: {
+    id: "facility", label: "Facility", source: "mv", ppdRule: "facility-scoped",
+    filterColumn: "facility_id",
+    labelJoin: { table: "bvs.facilities", alias: "f", pkColumn: "id", factColumn: "facility_id", labelColumns: ["name"] },
+  },
+  gl: {
+    id: "gl", label: "GL Account", source: "mv", ppdRule: "portfolio-shared",
+    filterColumn: "gl_account_id",
+    labelJoin: { table: "bvs.gl_accounts", alias: "g", pkColumn: "id", factColumn: "gl_account_id", labelColumns: ["code", "name"] },
+  },
+  vendor: {
+    id: "vendor", label: "Vendor", source: "raw", ppdRule: "portfolio-shared",
+    filterColumn: "vendor_id",
+    labelJoin: { table: "bvs.vendors", alias: "v", pkColumn: "id", factColumn: "vendor_id", labelColumns: ["name"] },
+  },
+  txn:   { id: "txn",   label: "Transaction", source: "raw", ppdRule: "none" },
+  month: { id: "month", label: "Month",       source: "mv",  ppdRule: "none" },
+};
+
+export const PERSPECTIVE_DEFAULTS: Record<Perspective, DimensionId[]> = {
+  facility: ["facility", "gl", "vendor", "txn"],
+  gl:       ["gl",       "facility", "vendor", "txn"],
+  vendor:   ["vendor",   "gl",       "facility", "txn"],
+};
+
+export type LogicalPlan = {
+  version: "1.0.0";
+  path: DimensionId[];
+  groupBy: DimensionId;
+  filterStack: Filter[];
+  timeframe: Timeframe;
+  spendMode: SpendMode;
+  routingStrategy: RoutingStrategy;
+  ppdRowRule: PpdRule;
+  ppdKpiRule: PpdRule;
+  dimensionsUsed: DimensionDef[];
+  computedFields: ("spend" | "budget" | "ppd")[];
+};
+
+export type Lineage = {
+  computation: {
+    filterStack: Record<string, string | string[]>;
+    source: "BVS_KERNEL_V3";
+    composerVersion: string;
+    computed: { spend: boolean; budget: boolean; ppd: boolean };
+  };
+  traversal: {
+    perspective: Perspective;
+    parentId: string | null;
+    aggregationPath: string[];
+  };
+};
+
+export type ColumnId =
+  | "label" | "budget" | "spend" | "committed" | "variance" | "variancePercent"
+  | "personDays" | "spendPPD" | "budgetPPD" | "variancePPD" | "trend" | "status"
+  | "txnCount" | "avgTransaction" | "lastTxnDate"
+  | "txnDate" | "amount" | "reference" | "poNumber" | "invoiceNumber" | "txnType" | "excluded";
+
+const COLUMN_SETS_DEFAULT: Record<DimensionId, ColumnId[]> = {
+  facility: ["label","budget","spend","variance","variancePercent","personDays","spendPPD","budgetPPD","variancePPD","trend","status"],
+  gl:       ["label","budget","spend","variance","variancePercent","personDays","spendPPD","budgetPPD","variancePPD","trend","status"],
+  vendor:   ["label","spend","committed","txnCount","avgTransaction","lastTxnDate","trend"],
+  txn:      ["txnDate","amount","committed","reference","poNumber","invoiceNumber","txnType","excluded"],
+  month:    ["label","budget","spend","variance","variancePercent"],
+};
+
+const COLUMN_SETS: Partial<Record<Perspective, Partial<Record<DimensionId, ColumnId[]>>>> = {};
+
+export function getDimension(id: DimensionId): DimensionDef {
+  const dim = DIMENSIONS_REGISTRY[id];
+  if (!dim) throw new Error(`[registry] Unknown dimension "${id}".`);
+  return dim;
+}
+
+export function getDimensionByFilterColumn(column: string): DimensionDef | undefined {
+  for (const dim of Object.values(DIMENSIONS_REGISTRY)) {
+    if (dim.filterColumn === column) return dim;
+  }
+  return undefined;
+}
+
+export function getColumnSet(perspective: Perspective, dimension: DimensionId): ColumnId[] {
+  const override = COLUMN_SETS[perspective]?.[dimension];
+  if (override) return override;
+  const dflt = COLUMN_SETS_DEFAULT[dimension];
+  if (!dflt) throw new Error(`[registry] No column set for (${perspective}, ${dimension}).`);
+  return dflt;
+}
+
+export function validateDrillPath(path: DimensionId[]): void {
+  if (!path || path.length === 0) throw new Error(`[registry] Drill path is empty.`);
+  if (path.length > 4) throw new Error(`[registry] Drill path too long (${path.length}); max 4.`);
+  const root = path[0];
+  if (root !== "facility" && root !== "gl" && root !== "vendor") {
+    throw new Error(`[registry] Drill path root must be facility|gl|vendor; got "${root}".`);
+  }
+  const seen = new Set<DimensionId>();
+  for (let i = 0; i < path.length; i++) {
+    const id = path[i];
+    if (!DIMENSIONS_REGISTRY[id]) throw new Error(`[registry] Unknown dimension "${id}" at index ${i}.`);
+    if (seen.has(id)) throw new Error(`[registry] Duplicate dimension "${id}".`);
+    seen.add(id);
+    if (id === "txn" && i !== path.length - 1) {
+      throw new Error(`[registry] "txn" must be the final element.`);
+    }
+  }
 }
