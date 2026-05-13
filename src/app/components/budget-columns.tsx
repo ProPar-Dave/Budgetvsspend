@@ -379,7 +379,7 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
         enableSorting: true,
         cell: (info: any) => {
           const row = info.row.original
-          const basis: "full_scope" | "gl_applicability" | undefined =
+          const basis: "full_scope" | "gl_applicability" | "gl_applicability_fallback" | undefined =
             row._ppdCalculationBasis
           const censusBasisKind = row.censusBasis
           const projectedSuffix = censusBasisKind === "PROJECTED" ? "P" : ""
@@ -398,6 +398,34 @@ export function budgetColumns(metric: "dollars" | "ppd" = "dollars", nameHeader:
             return a.localeCompare(b)
           }
           const fmt = (n: number) => Math.round(n).toLocaleString("en-US")
+
+          // ---- Branch 1b: gl_applicability_fallback. ----
+          // Round 4f: applicable types ∩ facility types = ∅ (e.g., AL+SNF
+          // partial GL at IL-only facility). Engine fell back to facility's
+          // full PD as denominator. Cell shows the contributing facility types
+          // and total; tooltip explains the fallback.
+          if (basis === "gl_applicability_fallback" && byType && Array.isArray(applicable)) {
+            const contributingEntries: Array<[string, number]> = Object.entries(byType)
+              .map(([t, pd]) => [t, Number(pd)] as [string, number])
+              .filter(([, pd]) => pd > 0)
+              .sort(([a], [b]) => sortTypes(a, b))
+            const contributingLabels = contributingEntries.map(([t]) => t).join(" + ") || "(none)"
+            const contributingSum = contributingEntries.reduce((a, [, pd]) => a + pd, 0)
+            const tooltip = [
+              "PPD denominator basis",
+              `Included: ${contributingLabels} (facility fallback)`,
+              `Included person-days: ${fmt(contributingSum)}`,
+              `GL applies to: ${applicable.join(" + ")}`,
+              "(GL's applicable types not present at this facility)",
+            ].join("\n")
+            return (
+              <span style={TABULAR_NUMS} title={tooltip} className="cursor-help">
+                <span className="text-gray-500 italic mr-1">({contributingLabels})</span>
+                {fmt(contributingSum)}
+                {projectedSuffix && <span className="text-gray-400 text-[10px] ml-0.5">{projectedSuffix}</span>}
+              </span>
+            )
+          }
 
           // ---- Branch 1: gl_applicability → compact (TYPES) TOTAL format. ----
           // Round 4e: redesigned per UX feedback. The per-type breakdown for the
