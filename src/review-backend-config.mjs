@@ -6,8 +6,16 @@ export function requireReviewBrowserKey(browserKey) {
   let claims
   try {
     const parts = browserKey.split('.')
-    if (parts.length !== 3) throw new Error('Invalid browser key')
-    claims = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+    if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part))) {
+      throw new Error('Invalid browser key')
+    }
+    const decode = part => atob(part.replace(/-/g, '+').replace(/_/g, '/'))
+    const header = JSON.parse(decode(parts[0]))
+    // Legacy Supabase anon keys use HS256; the backend verifies the signature.
+    if (header?.alg !== 'HS256' || header?.typ !== 'JWT' || decode(parts[2]).length !== 32) {
+      throw new Error('Invalid legacy JWT structure')
+    }
+    claims = JSON.parse(decode(parts[1]))
   } catch {
     throw new Error('Review backend requires its browser-safe anon JWT')
   }
