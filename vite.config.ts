@@ -26,6 +26,8 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
+      // Review builds use provider-managed browser configuration, never the retired Make binding.
+      '/utils/supabase/info': path.resolve(__dirname, './src/review-backend.ts'),
       // Alias @ to the src directory
       '@': path.resolve(__dirname, './src'),
     },
