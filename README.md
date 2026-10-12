@@ -15,8 +15,9 @@ The review build preserves this Make-export UI and binds it to the registered
 P2P-Simulation backend (`snlklhpebjlrebkqsxyi`). The retired Make project is
 not used by Vite.
 
-Vercel must supply `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` through its
-existing provider-managed configuration. Only the project's browser-safe anon
+Vercel must supply `VITE_SUPABASE_ANON_KEY` through its existing provider-managed
+configuration. The project ID is fixed in source; the old `VITE_SUPABASE_URL`
+setting cannot redirect this review build to the retired backend. Only the project's browser-safe anon
 JWT is supported by the current JWT-verified Edge Function. The client rejects
 missing configuration, another project, and privileged keys. No key values
 belong in source, logs, or deployment evidence.

@@ -1,17 +1,9 @@
 // The external review surface uses the existing synthetic P2P-Simulation backend.
 // Vercel supplies browser-safe configuration without copying credentials into source.
-const backendUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
 const browserKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-const expectedHost = 'snlklhpebjlrebkqsxyi.supabase.co'
 
-if (!backendUrl || !browserKey) {
+if (!browserKey) {
   throw new Error('Review backend configuration is missing')
-}
-const parsedUrl = new URL(backendUrl)
-if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== expectedHost ||
-    parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash ||
-    (parsedUrl.pathname !== '/' && parsedUrl.pathname !== '')) {
-  throw new Error('Review backend must be the registered P2P-Simulation project')
 }
 
 // The existing Edge Function verifies legacy JWTs. Reject privileged or mismatched keys.
