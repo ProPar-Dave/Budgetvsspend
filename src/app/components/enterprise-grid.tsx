@@ -586,7 +586,10 @@ export function EnterpriseGrid<T>({ table, gridState, onGridStateChange, viewSta
                   className="cursor-pointer text-[#005390] hover:underline text-[17px]"
                   onClick={() => {
                     setSelectedRowName(null)
-                    if (seg.viewId) {
+                    if (i === 0) {
+                      // Root navigation must discard descendant scope filters.
+                      onPivotByChange(pivotBy)
+                    } else if (seg.viewId) {
                       onActiveViewIdChange(seg.viewId)
                     }
                   }}
